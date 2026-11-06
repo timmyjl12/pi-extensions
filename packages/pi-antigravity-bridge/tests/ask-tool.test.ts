@@ -19,7 +19,7 @@ import { parseAgentFrontmatter } from "./helpers/frontmatter.js";
 import { toAgyEffort } from "../src/models.js";
 
 vi.mock("../src/mcp-registration.js", () => ({
-	acquireBridgeSuppression: () => () => {},
+	acquireBridgeSuppression: async () => async () => undefined,
 }));
 
 // The REAL `agy models` stdout shape (verified live 2026-10, trimmed to two

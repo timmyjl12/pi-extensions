@@ -46,9 +46,9 @@ function reg(home: string, entry: typeof ENTRY) {
 	return registerBridgeServer(entry, cfgFile(home), { markerPath: markerFile(home) });
 }
 
-test("registerBridgeServer writes the exact agy entry shape into a fresh file", () => {
+test("registerBridgeServer writes the exact agy entry shape into a fresh file", async () => {
 	const home = tmpHome();
-	const res = reg(home, ENTRY);
+	const res = await reg(home, ENTRY);
 	assert.equal(res.wrote, true);
 	assert.equal(res.disabled, false);
 	const parsed = JSON.parse(fs.readFileSync(cfgFile(home), "utf8"));
@@ -60,21 +60,21 @@ test("registerBridgeServer writes the exact agy entry shape into a fresh file", 
 	fs.rmSync(home, { recursive: true, force: true });
 });
 
-test("the shared config file lands 0600 (it carries the bridge token)", () => {
+test("the shared config file lands 0600 (it carries the bridge token)", async () => {
 	const home = tmpHome();
-	reg(home, ENTRY);
+	await reg(home, ENTRY);
 	const mode = fs.statSync(cfgFile(home)).mode & 0o777;
 	assert.equal(mode, 0o600, `expected 0600, got ${mode.toString(8)}`);
 	// And a pre-existing world-readable file is tightened on the next write.
 	const file = cfgFile(home);
 	fs.chmodSync(file, 0o644);
-	unregisterBridgeServer(4242, file);
+	await unregisterBridgeServer(4242, file);
 	const after = fs.statSync(file).mode & 0o777;
 	assert.equal(after, 0o600, `expected 0600 after rewrite, got ${after.toString(8)}`);
 	fs.rmSync(home, { recursive: true, force: true });
 });
 
-test("register preserves foreign servers and refreshes our entry", () => {
+test("register preserves foreign servers and refreshes our entry", async () => {
 	const home = tmpHome();
 	const file = cfgFile(home);
 	fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -82,49 +82,49 @@ test("register preserves foreign servers and refreshes our entry", () => {
 		file,
 		JSON.stringify({ mcpServers: { "user-server": { serverUrl: "https://example.com/mcp" } } }),
 	);
-	reg(home, ENTRY);
-	reg(home, { ...ENTRY, port: 50000 });
+	await reg(home, ENTRY);
+	await reg(home, { ...ENTRY, port: 50000 });
 	const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
 	assert.ok(parsed.mcpServers["user-server"], "foreign server preserved");
 	assert.equal(parsed.mcpServers["pi-bridge-4242"].serverUrl, "http://127.0.0.1:50000/mcp");
 	fs.rmSync(home, { recursive: true, force: true });
 });
 
-test("corrupt config is refused, never clobbered", () => {
+test("corrupt config is refused, never clobbered", async () => {
 	const home = tmpHome();
 	const file = cfgFile(home);
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	fs.writeFileSync(file, "{broken");
-	const res = reg(home, ENTRY);
+	const res = await reg(home, ENTRY);
 	assert.equal(res.wrote, false);
 	assert.match(res.reason ?? "", /refusing/);
 	assert.equal(fs.readFileSync(file, "utf8"), "{broken");
 	fs.rmSync(home, { recursive: true, force: true });
 });
 
-test("unregister removes only our entry and reports no-op when absent", () => {
+test("unregister removes only our entry and reports no-op when absent", async () => {
 	const home = tmpHome();
 	const file = cfgFile(home);
-	reg(home, ENTRY);
-	assert.equal(unregisterBridgeServer(4242, file).wrote, true);
+	await reg(home, ENTRY);
+	assert.equal((await unregisterBridgeServer(4242, file)).wrote, true);
 	const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
 	assert.equal(parsed.mcpServers["pi-bridge-4242"], undefined);
-	assert.equal(unregisterBridgeServer(4242, file).wrote, false);
+	assert.equal((await unregisterBridgeServer(4242, file)).wrote, false);
 	fs.rmSync(home, { recursive: true, force: true });
 });
 
-test("sweep removes dead-pid bridge entries, keeps live ones and foreign ones", () => {
+test("sweep removes dead-pid bridge entries, keeps live ones and foreign ones", async () => {
 	const home = tmpHome();
 	const file = cfgFile(home);
-	reg(home, { ...ENTRY, pid: 1111 });
-	reg(home, { ...ENTRY, pid: 2222 });
+	await reg(home, { ...ENTRY, pid: 1111 });
+	await reg(home, { ...ENTRY, pid: 2222 });
 	const parsed0 = JSON.parse(fs.readFileSync(file, "utf8"));
 	parsed0.mcpServers["user-server"] = { serverUrl: "https://example.com/mcp" };
 	parsed0.mcpServers["pi-bridge-notapid"] = { serverUrl: "https://odd.example/mcp" };
 	fs.writeFileSync(file, JSON.stringify(parsed0));
 
 	const alive = (pid: number) => pid === 2222;
-	const res = sweepStaleBridgeServers(file, alive);
+	const res = await sweepStaleBridgeServers(file, alive);
 	assert.deepEqual(res.removed.sort(), ["pi-bridge-1111"]);
 	const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
 	assert.equal(parsed.mcpServers["pi-bridge-1111"], undefined);
@@ -134,7 +134,7 @@ test("sweep removes dead-pid bridge entries, keeps live ones and foreign ones", 
 	fs.rmSync(home, { recursive: true, force: true });
 });
 
-test("bridgeServerName, mcpConfigPath and suppressionMarkerPath shapes", () => {
+test("bridgeServerName, mcpConfigPath and suppressionMarkerPath shapes", async () => {
 	assert.equal(bridgeServerName(7), "pi-bridge-7");
 	assert.equal(mcpConfigPath("/h"), path.join("/h", ".gemini", "config", "mcp_config.json"));
 	assert.equal(
@@ -150,16 +150,16 @@ test("bridgeServerName, mcpConfigPath and suppressionMarkerPath shapes", () => {
 	);
 });
 
-test("setBridgeEntriesDisabled flips only our entries and restores them", () => {
+test("setBridgeEntriesDisabled flips only our entries and restores them", async () => {
 	const home = tmpHome();
 	const file = cfgFile(home);
-	reg(home, { ...ENTRY, pid: 1111 });
-	reg(home, { ...ENTRY, pid: 2222 });
+	await reg(home, { ...ENTRY, pid: 1111 });
+	await reg(home, { ...ENTRY, pid: 2222 });
 	const seed = JSON.parse(fs.readFileSync(file, "utf8"));
 	seed.mcpServers["user-server"] = { serverUrl: "https://example.com/mcp" };
 	fs.writeFileSync(file, JSON.stringify(seed));
 
-	const off = setBridgeEntriesDisabled(true, file);
+	const off = await setBridgeEntriesDisabled(true, file);
 	assert.equal(off.wrote, true);
 	assert.equal(off.changed, 2);
 	let parsed = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -169,11 +169,11 @@ test("setBridgeEntriesDisabled flips only our entries and restores them", () => 
 	assert.ok(parsed.mcpServers["user-server"], "foreign preserved");
 
 	// Idempotent: no change means no write.
-	const again = setBridgeEntriesDisabled(true, file);
+	const again = await setBridgeEntriesDisabled(true, file);
 	assert.equal(again.wrote, false);
 	assert.equal(again.changed, 0);
 
-	const on = setBridgeEntriesDisabled(false, file);
+	const on = await setBridgeEntriesDisabled(false, file);
 	assert.equal(on.wrote, true);
 	assert.equal(on.changed, 2);
 	parsed = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -183,26 +183,26 @@ test("setBridgeEntriesDisabled flips only our entries and restores them", () => 
 	fs.rmSync(home, { recursive: true, force: true });
 });
 
-test("acquireBridgeSuppression refcounts: first acquire disables, last release restores", () => {
+test("acquireBridgeSuppression refcounts: first acquire disables, last release restores", async () => {
 	const home = tmpHome();
 	const file = cfgFile(home);
 	const marker = markerFile(home);
-	reg(home, ENTRY);
+	await reg(home, ENTRY);
 
-	const releaseA = acquireBridgeSuppression({ configPath: file, markerPath: marker });
+	const releaseA = await acquireBridgeSuppression({ configPath: file, markerPath: marker });
 	assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).mcpServers["pi-bridge-4242"].disabled, true);
 
 	// Overlapping acquire: no extra write needed, and an early release must
 	// NOT restore while another holder is still active (the clobber race).
-	const releaseB = acquireBridgeSuppression({ configPath: file, markerPath: marker });
-	releaseA();
+	const releaseB = await acquireBridgeSuppression({ configPath: file, markerPath: marker });
+	await releaseA();
 	assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).mcpServers["pi-bridge-4242"].disabled, true);
 
-	releaseB();
+	await releaseB();
 	assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).mcpServers["pi-bridge-4242"].disabled, false);
 
 	// Double release is a no-op.
-	releaseA();
+	await releaseA();
 	assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).mcpServers["pi-bridge-4242"].disabled, false);
 	fs.rmSync(home, { recursive: true, force: true });
 });
@@ -211,41 +211,41 @@ test("suppression refcount survives a runtime replacement (/reload)", async () =
 	const home = tmpHome();
 	const file = cfgFile(home);
 	const marker = markerFile(home);
-	reg(home, ENTRY);
+	await reg(home, ENTRY);
 
 	// Runtime A acquires, as a live delegation would.
 	const { acquireBridgeSuppression: acquireA } = await import("../src/mcp-registration.js");
-	const releaseA = acquireA({ configPath: file, markerPath: marker, pid: 4242 });
+	const releaseA = await acquireA({ configPath: file, markerPath: marker, pid: 4242 });
 	assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).mcpServers["pi-bridge-4242"].disabled, true);
 
 	// pi replaces the runtime on /new,/resume,/fork,/reload: fresh module
 	// instances, same process. Runtime B acquires for its own delegation.
 	vi.resetModules();
 	const { acquireBridgeSuppression: acquireB } = await import("../src/mcp-registration.js");
-	const releaseB = acquireB({ configPath: file, markerPath: marker, pid: 4242 });
+	const releaseB = await acquireB({ configPath: file, markerPath: marker, pid: 4242 });
 
 	// Runtime A's late release (its kill path is async) must not re-enable
 	// entries under runtime B's live delegation.
-	releaseA();
+	await releaseA();
 	assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).mcpServers["pi-bridge-4242"].disabled, true);
 
-	releaseB();
+	await releaseB();
 	assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).mcpServers["pi-bridge-4242"].disabled, false);
 	fs.rmSync(home, { recursive: true, force: true });
 });
 
-test("setBridgeEntriesDisabled refuses corrupt config, no-ops on missing/empty", () => {
+test("setBridgeEntriesDisabled refuses corrupt config, no-ops on missing/empty", async () => {
 	const home = tmpHome();
 	const file = cfgFile(home);
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	fs.writeFileSync(file, "{broken");
-	const refused = setBridgeEntriesDisabled(true, file);
+	const refused = await setBridgeEntriesDisabled(true, file);
 	assert.equal(refused.wrote, false);
 	assert.match(refused.reason ?? "", /refusing/);
 	assert.equal(fs.readFileSync(file, "utf8"), "{broken");
 
 	// Missing file: nothing to flip, nothing to write.
-	const missing = setBridgeEntriesDisabled(false, cfgFile(tmpHome()));
+	const missing = await setBridgeEntriesDisabled(false, cfgFile(tmpHome()));
 	assert.equal(missing.wrote, false);
 	assert.equal(missing.changed, 0);
 	fs.rmSync(home, { recursive: true, force: true });
@@ -253,17 +253,17 @@ test("setBridgeEntriesDisabled refuses corrupt config, no-ops on missing/empty",
 
 // --- Cross-process suppression marker ---------------------------------------
 
-test("acquire records the delegator in the marker; release removes it", () => {
+test("acquire records the delegator in the marker; release removes it", async () => {
 	const home = tmpHome();
 	const file = cfgFile(home);
 	const marker = markerFile(home);
-	reg(home, ENTRY);
+	await reg(home, ENTRY);
 
-	const release = acquireBridgeSuppression({ configPath: file, markerPath: marker, pid: 1111 });
+	const release = await acquireBridgeSuppression({ configPath: file, markerPath: marker, pid: 1111 });
 	const m = JSON.parse(fs.readFileSync(marker, "utf8"));
 	assert.ok(m.delegators["1111"].since > 0, "delegator recorded with a timestamp");
 
-	release();
+	await release();
 	const after = JSON.parse(fs.readFileSync(marker, "utf8"));
 	assert.equal(after.delegators["1111"], undefined, "delegator removed on release");
 	assert.equal(
@@ -273,10 +273,10 @@ test("acquire records the delegator in the marker; release removes it", () => {
 	fs.rmSync(home, { recursive: true, force: true });
 });
 
-test("the marker file lands 0600 inside a 0700 directory", () => {
+test("the marker file lands 0600 inside a 0700 directory", async () => {
 	const home = tmpHome();
 	const marker = markerFile(home);
-	const release = acquireBridgeSuppression({
+	const release = await acquireBridgeSuppression({
 		configPath: cfgFile(home),
 		markerPath: marker,
 		pid: 1111,
@@ -285,31 +285,31 @@ test("the marker file lands 0600 inside a 0700 directory", () => {
 	assert.equal(mode, 0o600, `expected 0600, got ${mode.toString(8)}`);
 	const dirMode = fs.statSync(path.dirname(marker)).mode & 0o777;
 	assert.equal(dirMode, 0o700, `expected 0700 on the data dir, got ${dirMode.toString(8)}`);
-	release();
+	await release();
 	fs.rmSync(home, { recursive: true, force: true });
 });
 
-test("two sessions delegating concurrently: entries stay disabled until the LAST release", () => {
+test("two sessions delegating concurrently: entries stay disabled until the LAST release", async () => {
 	const home = tmpHome();
 	const file = cfgFile(home);
 	const marker = markerFile(home);
-	reg(home, { ...ENTRY, pid: 1111 });
-	reg(home, { ...ENTRY, pid: 2222 });
+	await reg(home, { ...ENTRY, pid: 1111 });
+	await reg(home, { ...ENTRY, pid: 2222 });
 	const alive = (pid: number) => pid === 1111 || pid === 2222;
 	const opts = { configPath: file, markerPath: marker, isAlive: alive };
 
-	const releaseA = acquireBridgeSuppression({ ...opts, pid: 1111 });
-	const releaseB = acquireBridgeSuppression({ ...opts, pid: 2222 });
+	const releaseA = await acquireBridgeSuppression({ ...opts, pid: 1111 });
+	const releaseB = await acquireBridgeSuppression({ ...opts, pid: 2222 });
 
 	// Session A finishes first: B is still delegating, entries must stay hidden.
-	releaseA();
+	await releaseA();
 	assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).mcpServers["pi-bridge-1111"].disabled, true);
 	assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).mcpServers["pi-bridge-2222"].disabled, true);
 	let m = JSON.parse(fs.readFileSync(marker, "utf8"));
 	assert.deepEqual(Object.keys(m.delegators).sort(), ["2222"], "A pruned, B kept");
 
 	// Session B finishes: no live delegator remains, entries come back.
-	releaseB();
+	await releaseB();
 	m = JSON.parse(fs.readFileSync(marker, "utf8"));
 	assert.deepEqual(m.delegators, {});
 	assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).mcpServers["pi-bridge-1111"].disabled, false);
@@ -317,11 +317,11 @@ test("two sessions delegating concurrently: entries stay disabled until the LAST
 	fs.rmSync(home, { recursive: true, force: true });
 });
 
-test("release prunes a dead co-delegator and restores entries", () => {
+test("release prunes a dead co-delegator and restores entries", async () => {
 	const home = tmpHome();
 	const file = cfgFile(home);
 	const marker = markerFile(home);
-	reg(home, ENTRY);
+	await reg(home, ENTRY);
 	// A crashed pi left pid 999 behind (dead now).
 	fs.writeFileSync(
 		marker,
@@ -329,26 +329,26 @@ test("release prunes a dead co-delegator and restores entries", () => {
 	);
 
 	const alive = (pid: number) => pid === process.pid;
-	const release = acquireBridgeSuppression({ configPath: file, markerPath: marker, isAlive: alive });
-	release();
+	const release = await acquireBridgeSuppression({ configPath: file, markerPath: marker, isAlive: alive });
+	await release();
 	const m = JSON.parse(fs.readFileSync(marker, "utf8"));
 	assert.deepEqual(m.delegators, {}, "dead co-delegator pruned");
 	assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).mcpServers["pi-bridge-4242"].disabled, false);
 	fs.rmSync(home, { recursive: true, force: true });
 });
 
-test("session-start heal keeps entries hidden while a live delegation is in flight", () => {
+test("session-start heal keeps entries hidden while a live delegation is in flight", async () => {
 	const home = tmpHome();
 	const file = cfgFile(home);
 	const marker = markerFile(home);
-	reg(home, ENTRY);
-	setBridgeEntriesDisabled(true, file);
+	await reg(home, ENTRY);
+	await setBridgeEntriesDisabled(true, file);
 	fs.writeFileSync(
 		marker,
 		JSON.stringify({ delegators: { "1111": { since: Date.now() } } }),
 	);
 
-	const res = healBridgeSuppression({
+	const res = await healBridgeSuppression({
 		configPath: file,
 		markerPath: marker,
 		isAlive: (pid) => pid === 1111,
@@ -363,18 +363,18 @@ test("session-start heal keeps entries hidden while a live delegation is in flig
 	fs.rmSync(home, { recursive: true, force: true });
 });
 
-test("heal prunes dead delegators and re-enables the entries", () => {
+test("heal prunes dead delegators and re-enables the entries", async () => {
 	const home = tmpHome();
 	const file = cfgFile(home);
 	const marker = markerFile(home);
-	reg(home, ENTRY);
-	setBridgeEntriesDisabled(true, file);
+	await reg(home, ENTRY);
+	await setBridgeEntriesDisabled(true, file);
 	fs.writeFileSync(
 		marker,
 		JSON.stringify({ delegators: { "999": { since: Date.now() } } }),
 	);
 
-	const res = healBridgeSuppression({ configPath: file, markerPath: marker, isAlive: () => false });
+	const res = await healBridgeSuppression({ configPath: file, markerPath: marker, isAlive: () => false });
 	assert.equal(res.reEnabled, true);
 	assert.deepEqual(res.pruned, ["999"]);
 	assert.equal(
@@ -384,16 +384,16 @@ test("heal prunes dead delegators and re-enables the entries", () => {
 	fs.rmSync(home, { recursive: true, force: true });
 });
 
-test("heal prunes a delegator past the age bound even when its pid looks alive", () => {
+test("heal prunes a delegator past the age bound even when its pid looks alive", async () => {
 	const home = tmpHome();
 	const file = cfgFile(home);
 	const marker = markerFile(home);
-	reg(home, ENTRY);
-	setBridgeEntriesDisabled(true, file);
+	await reg(home, ENTRY);
+	await setBridgeEntriesDisabled(true, file);
 	const stale = Date.now() - 25 * 60 * 60 * 1000;
 	fs.writeFileSync(marker, JSON.stringify({ delegators: { "1111": { since: stale } } }));
 
-	const res = healBridgeSuppression({
+	const res = await healBridgeSuppression({
 		configPath: file,
 		markerPath: marker,
 		isAlive: () => true, // pid reuse or anything else: age wins
@@ -403,15 +403,15 @@ test("heal prunes a delegator past the age bound even when its pid looks alive",
 	fs.rmSync(home, { recursive: true, force: true });
 });
 
-test("corrupt marker is treated as empty: heal re-enables, no crash", () => {
+test("corrupt marker is treated as empty: heal re-enables, no crash", async () => {
 	const home = tmpHome();
 	const file = cfgFile(home);
 	const marker = markerFile(home);
-	reg(home, ENTRY);
-	setBridgeEntriesDisabled(true, file);
+	await reg(home, ENTRY);
+	await setBridgeEntriesDisabled(true, file);
 	fs.writeFileSync(marker, "{broken");
 
-	const res = healBridgeSuppression({ configPath: file, markerPath: marker, isAlive: () => true });
+	const res = await healBridgeSuppression({ configPath: file, markerPath: marker, isAlive: () => true });
 	assert.equal(res.reEnabled, true);
 	assert.equal(
 		JSON.parse(fs.readFileSync(file, "utf8")).mcpServers["pi-bridge-4242"].disabled,
@@ -420,7 +420,7 @@ test("corrupt marker is treated as empty: heal re-enables, no crash", () => {
 	fs.rmSync(home, { recursive: true, force: true });
 });
 
-test("registerBridgeServer lands disabled while a live delegation is in flight", () => {
+test("registerBridgeServer lands disabled while a live delegation is in flight", async () => {
 	const home = tmpHome();
 	const file = cfgFile(home);
 	const marker = markerFile(home);
@@ -429,7 +429,7 @@ test("registerBridgeServer lands disabled while a live delegation is in flight",
 		JSON.stringify({ delegators: { "1111": { since: Date.now() } } }),
 	);
 
-	const suppressed = registerBridgeServer(ENTRY, file, {
+	const suppressed = await registerBridgeServer(ENTRY, file, {
 		markerPath: marker,
 		isAlive: (pid) => pid === 1111,
 	});
@@ -441,10 +441,52 @@ test("registerBridgeServer lands disabled while a live delegation is in flight",
 	);
 
 	// No live delegation: registration is normally enabled.
-	const normal = registerBridgeServer({ ...ENTRY, port: 47882 }, file, {
+	const normal = await registerBridgeServer({ ...ENTRY, port: 47882 }, file, {
 		markerPath: marker,
 		isAlive: () => false,
 	});
 	assert.equal(normal.disabled, false);
+	fs.rmSync(home, { recursive: true, force: true });
+});
+
+test("concurrent registrations serialize read/modify/write without losing entries", async () => {
+	const home = tmpHome();
+	const file = cfgFile(home);
+	await Promise.all([
+		reg(home, { ...ENTRY, pid: 1111 }),
+		reg(home, { ...ENTRY, pid: 2222 }),
+	]);
+	const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+	assert.ok(parsed.mcpServers["pi-bridge-1111"]);
+	assert.ok(parsed.mcpServers["pi-bridge-2222"]);
+	fs.rmSync(home, { recursive: true, force: true });
+});
+
+test("concurrent nested suppression acquires wait for the first disable", async () => {
+	const home = tmpHome();
+	const file = cfgFile(home);
+	const marker = markerFile(home);
+	await reg(home, ENTRY);
+	const [releaseA, releaseB] = await Promise.all([
+		acquireBridgeSuppression({ configPath: file, markerPath: marker }),
+		acquireBridgeSuppression({ configPath: file, markerPath: marker }),
+	]);
+	assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).mcpServers["pi-bridge-4242"].disabled, true);
+	await releaseA();
+	assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).mcpServers["pi-bridge-4242"].disabled, true);
+	await releaseB();
+	assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).mcpServers["pi-bridge-4242"].disabled, false);
+	fs.rmSync(home, { recursive: true, force: true });
+});
+
+test("atomic config write failures reject and leave the original untouched", async () => {
+	const home = tmpHome();
+	const file = cfgFile(home);
+	await reg(home, ENTRY);
+	// A directory at the deterministic temp path makes writeFile fail on every OS.
+	fs.mkdirSync(`${file}.${process.pid}.tmp`, { recursive: true });
+	await assert.rejects(reg(home, { ...ENTRY, port: 50000 }));
+	const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+	assert.equal(parsed.mcpServers["pi-bridge-4242"].serverUrl, "http://127.0.0.1:47881/mcp");
 	fs.rmSync(home, { recursive: true, force: true });
 });

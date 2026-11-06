@@ -6,7 +6,8 @@
 // bundled resource dir. Nothing is appended to the prompt: agy sees the
 // catalog in tools/list on every spawn, including after pi compaction.
 
-import fs from "node:fs";
+import type { Dirent } from "node:fs";
+import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -63,10 +64,22 @@ export interface SkillLocation {
 }
 
 const MAX_DEPTH = 16; // symlink-loop insurance; real catalogs nest 1-2 levels
+export const SKILL_SCAN_MAX_DIRECTORIES = 128;
+const SKILL_SCAN_MAX_ENTRIES = 4096;
+const SKILL_SCAN_MAX_ENTRIES_PER_DIRECTORY = 512;
+
+async function pathExists(file: string): Promise<boolean> {
+	try {
+		await fs.access(file);
+		return true;
+	} catch {
+		return false;
+	}
+}
 
 /** Ordered skill locations for a session: pi global dirs, then project dirs
  *  (project `.agents/skills` walks cwd ancestors up to the git root). */
-export function skillLocations(projectDir?: string, home: string = os.homedir()): SkillLocation[] {
+export async function skillLocations(projectDir?: string, home: string = os.homedir()): Promise<SkillLocation[]> {
 	const out: SkillLocation[] = [
 		{ dir: path.join(home, ".pi", "agent", "skills"), style: "pi" },
 		{ dir: path.join(home, ".agents", "skills"), style: "agents" },
@@ -76,17 +89,17 @@ export function skillLocations(projectDir?: string, home: string = os.homedir())
 	let dir = path.resolve(projectDir);
 	for (;;) {
 		out.push({ dir: path.join(dir, ".agents", "skills"), style: "agents" });
-		if (path.dirname(dir) === dir || fs.existsSync(path.join(dir, ".git"))) break;
+		if (path.dirname(dir) === dir || (await pathExists(path.join(dir, ".git")))) break;
 		dir = path.dirname(dir);
 	}
 	return out;
 }
 
-function readSkillFile(file: string, fallbackName: string): SkillLite | null {
+async function readSkillFile(file: string, fallbackName: string): Promise<SkillLite | null> {
 	let raw = "";
 	try {
 		// Strip a UTF-8 BOM so editors that add one do not break the `---` anchor.
-		raw = fs.readFileSync(file, "utf8").replace(/^\uFEFF/, "");
+		raw = (await fs.readFile(file, "utf8")).replace(/^\uFEFF/, "");
 	} catch {
 		return null;
 	}
@@ -102,40 +115,45 @@ function readSkillFile(file: string, fallbackName: string): SkillLite | null {
 	};
 }
 
-function scanLocation(loc: SkillLocation): SkillLite[] {
-	const walk = (dir: string, depth: number): SkillLite[] => {
-		if (depth > MAX_DEPTH) return [];
-		let entries: fs.Dirent[];
+async function scanLocation(loc: SkillLocation): Promise<SkillLite[]> {
+	const budget = { directories: 0, entries: 0 };
+	const walk = async (dir: string, depth: number): Promise<SkillLite[]> => {
+		if (depth > MAX_DEPTH || budget.directories >= SKILL_SCAN_MAX_DIRECTORIES) return [];
+		budget.directories++;
+		let entries: Dirent[];
 		try {
-			entries = fs.readdirSync(dir, { withFileTypes: true });
+			entries = await fs.readdir(dir, { withFileTypes: true });
 		} catch {
 			return [];
 		}
 		const found: SkillLite[] = [];
-		for (const entry of entries) {
+		for (const entry of entries.slice(0, SKILL_SCAN_MAX_ENTRIES_PER_DIRECTORY)) {
+			if (budget.entries >= SKILL_SCAN_MAX_ENTRIES) break;
+			budget.entries++;
 			// Hidden entries are harness internals (e.g. ~/.agents/skills/.system);
 			// pi's own [Skills] list never includes them.
 			if (entry.name.startsWith(".")) continue;
 			const full = path.join(dir, entry.name);
 			let isDir: boolean;
 			try {
-				isDir = entry.isDirectory() || (entry.isSymbolicLink() && fs.statSync(full).isDirectory());
+				isDir = entry.isDirectory() || (entry.isSymbolicLink() && (await fs.stat(full)).isDirectory());
 			} catch {
 				continue;
 			}
 			if (isDir) {
-				if (fs.existsSync(path.join(full, "SKILL.md"))) {
-					const skill = readSkillFile(path.join(full, "SKILL.md"), entry.name);
+				const skillFile = path.join(full, "SKILL.md");
+				if (await pathExists(skillFile)) {
+					const skill = await readSkillFile(skillFile, entry.name);
 					if (skill) found.push(skill);
 				} else {
-					found.push(...walk(full, depth + 1));
+					found.push(...await walk(full, depth + 1));
 				}
 				continue;
 			}
 			if (!entry.name.endsWith(".md") || entry.name === "SKILL.md") continue;
 			const standalone = loc.style === "pi" ? depth === 0 : depth > 0;
 			if (!standalone) continue;
-			const skill = readSkillFile(full, entry.name.replace(/\.md$/, ""));
+			const skill = await readSkillFile(full, entry.name.replace(/\.md$/, ""));
 			if (skill) found.push(skill);
 		}
 		return found;
@@ -145,11 +163,11 @@ function scanLocation(loc: SkillLocation): SkillLite[] {
 
 /** pi-faithful skill catalog: every skill pi itself would load, deduped by
  *  name (first wins). `home` is injectable for tests. */
-export function scanSkills(projectDir?: string, home: string = os.homedir()): SkillLite[] {
+export async function scanSkills(projectDir?: string, home: string = os.homedir()): Promise<SkillLite[]> {
 	const seen = new Set<string>();
 	const out: SkillLite[] = [];
-	for (const loc of skillLocations(projectDir, home)) {
-		for (const skill of scanLocation(loc)) {
+	for (const loc of await skillLocations(projectDir, home)) {
+		for (const skill of await scanLocation(loc)) {
 			if (seen.has(skill.name)) continue;
 			seen.add(skill.name);
 			out.push(skill);
@@ -168,9 +186,9 @@ export function catalogSummary(skills: SkillLite[]): string {
 }
 
 /** Full body handed to agy when it activates a skill. */
-export function readSkillBody(skill: SkillLite): string {
+export async function readSkillBody(skill: SkillLite): Promise<string> {
 	try {
-		return fs.readFileSync(skill.filePath, "utf8");
+		return await fs.readFile(skill.filePath, "utf8");
 	} catch (err) {
 		return `failed to read skill: ${err instanceof Error ? err.message : String(err)}`;
 	}

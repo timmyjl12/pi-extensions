@@ -19,7 +19,7 @@ import { expect, test, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 vi.mock("../src/mcp-registration.js", () => ({
-	acquireBridgeSuppression: () => () => {},
+	acquireBridgeSuppression: async () => async () => undefined,
 }));
 
 import { registerAskAntigravityTool } from "../src/ask-tool.js";

@@ -15,7 +15,7 @@
 //
 // Run: npm test
 
-import fs from "node:fs";
+import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -36,10 +36,28 @@ export interface BridgeServerEntry {
 
 type McpConfig = { mcpServers: Record<string, unknown> };
 
-function readConfig(file: string): { ok: true; config: McpConfig } | { ok: false; reason: string } {
+// Serialize read/modify/write sequences in this process, including across
+// extension reloads. Atomic rename protects readers; this queue also prevents
+// two live runtimes from overwriting each other's distinct edits.
+const FILE_QUEUES_KEY = Symbol.for("pi-antigravity-bridge.async-file-queues.v1");
+const fileQueues: Map<string, Promise<void>> = ((globalThis as Record<symbol, unknown>)[FILE_QUEUES_KEY] ??= new Map()) as Map<string, Promise<void>>;
+
+function serializeFile<T>(kind: string, file: string, operation: () => Promise<T>): Promise<T> {
+	const key = `${kind}\u0000${path.resolve(file)}`;
+	const previous = fileQueues.get(key) ?? Promise.resolve();
+	const run = previous.then(operation);
+	const settled = run.then(() => undefined, () => undefined);
+	fileQueues.set(key, settled);
+	void settled.then(() => {
+		if (fileQueues.get(key) === settled) fileQueues.delete(key);
+	});
+	return run;
+}
+
+async function readConfig(file: string): Promise<{ ok: true; config: McpConfig } | { ok: false; reason: string }> {
 	let parsed: unknown;
 	try {
-		parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+		parsed = JSON.parse(await fs.readFile(file, "utf8"));
 	} catch (err) {
 		const code = (err as NodeJS.ErrnoException).code;
 		if (code === "ENOENT") return { ok: true, config: { mcpServers: {} } };
@@ -55,14 +73,23 @@ function readConfig(file: string): { ok: true; config: McpConfig } | { ok: false
 	return { ok: true, config };
 }
 
-function writeConfig(file: string, config: McpConfig): void {
+async function writeConfig(file: string, config: McpConfig): Promise<void> {
 	// 0700/0600: the file carries the bridge's shared-secret token in its
 	// headers, and it lives in the USER'S global agy config (audit 2026-09-07:
 	// it previously landed at the umask default, typically world-readable).
-	fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
 	const tmp = `${file}.${process.pid}.tmp`;
-	fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
-	fs.renameSync(tmp, file);
+	try {
+		await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+		await fs.writeFile(tmp, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+		await fs.rename(tmp, file);
+	} catch (err) {
+		try {
+			await fs.unlink(tmp);
+		} catch {
+			/* preserve the write/rename error */
+		}
+		throw err;
+	}
 }
 
 /** Register (or refresh) the bridge's per-pid server entry. Foreign servers
@@ -80,29 +107,33 @@ export function registerBridgeServer(
 		isAlive?: (pid: number) => boolean;
 		now?: () => number;
 	} = {},
-): { wrote: boolean; disabled: boolean; reason?: string } {
-	const marker = readSuppressionMarker(opts.markerPath ?? suppressionMarkerPath());
-	const disabled = hasLiveDelegator(marker, opts.isAlive ?? pidAlive, (opts.now ?? Date.now)());
-	const read = readConfig(configPath);
-	if (!read.ok) return { wrote: false, disabled, reason: read.reason };
-	read.config.mcpServers[bridgeServerName(entry.pid)] = {
-		disabled,
-		headers: { [entry.tokenHeader]: entry.token },
-		serverUrl: `http://127.0.0.1:${entry.port}/mcp`,
-	} satisfies BridgeServerEntry;
-	writeConfig(configPath, read.config);
-	return { wrote: true, disabled };
+): Promise<{ wrote: boolean; disabled: boolean; reason?: string }> {
+	return serializeFile("mcp-config", configPath, async () => {
+		const marker = await readSuppressionMarker(opts.markerPath ?? suppressionMarkerPath());
+		const disabled = hasLiveDelegator(marker, opts.isAlive ?? pidAlive, (opts.now ?? Date.now)());
+		const read = await readConfig(configPath);
+		if (!read.ok) return { wrote: false, disabled, reason: read.reason };
+		read.config.mcpServers[bridgeServerName(entry.pid)] = {
+			disabled,
+			headers: { [entry.tokenHeader]: entry.token },
+			serverUrl: `http://127.0.0.1:${entry.port}/mcp`,
+		} satisfies BridgeServerEntry;
+		await writeConfig(configPath, read.config);
+		return { wrote: true, disabled };
+	});
 }
 
 /** Remove the bridge's per-pid server entry (close path). */
-export function unregisterBridgeServer(pid: number, configPath: string = mcpConfigPath()): { wrote: boolean } {
-	const read = readConfig(configPath);
-	if (!read.ok) return { wrote: false };
-	const name = bridgeServerName(pid);
-	if (!(name in read.config.mcpServers)) return { wrote: false };
-	delete read.config.mcpServers[name];
-	writeConfig(configPath, read.config);
-	return { wrote: true };
+export async function unregisterBridgeServer(pid: number, configPath: string = mcpConfigPath()): Promise<{ wrote: boolean }> {
+	return serializeFile("mcp-config", configPath, async () => {
+		const read = await readConfig(configPath);
+		if (!read.ok) return { wrote: false };
+		const name = bridgeServerName(pid);
+		if (!(name in read.config.mcpServers)) return { wrote: false };
+		delete read.config.mcpServers[name];
+		await writeConfig(configPath, read.config);
+		return { wrote: true };
+	});
 }
 
 /** Flip `disabled` on every pi-bridge-* entry (foreign servers untouched).
@@ -116,24 +147,26 @@ export function unregisterBridgeServer(pid: number, configPath: string = mcpConf
  *
  *  (2) Startup healing (disabled=false): clears entries a crashed delegation
  *  left suppressed. */
-export function setBridgeEntriesDisabled(
+export async function setBridgeEntriesDisabled(
 	disabled: boolean,
 	configPath: string = mcpConfigPath(),
-): { wrote: boolean; changed: number; reason?: string } {
-	const read = readConfig(configPath);
-	if (!read.ok) return { wrote: false, changed: 0, reason: read.reason };
-	let changed = 0;
-	for (const [name, entry] of Object.entries(read.config.mcpServers)) {
-		if (!/^pi-bridge-\d+$/.test(name)) continue;
-		if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
-		const e = entry as { disabled?: unknown };
-		if ((e.disabled === true) === disabled) continue;
-		e.disabled = disabled;
-		changed++;
-	}
-	if (changed === 0) return { wrote: false, changed: 0 };
-	writeConfig(configPath, read.config);
-	return { wrote: true, changed };
+): Promise<{ wrote: boolean; changed: number; reason?: string }> {
+	return serializeFile("mcp-config", configPath, async () => {
+		const read = await readConfig(configPath);
+		if (!read.ok) return { wrote: false, changed: 0, reason: read.reason };
+		let changed = 0;
+		for (const [name, entry] of Object.entries(read.config.mcpServers)) {
+			if (!/^pi-bridge-\d+$/.test(name)) continue;
+			if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+			const e = entry as { disabled?: unknown };
+			if ((e.disabled === true) === disabled) continue;
+			e.disabled = disabled;
+			changed++;
+		}
+		if (changed === 0) return { wrote: false, changed: 0 };
+		await writeConfig(configPath, read.config);
+		return { wrote: true, changed };
+	});
 }
 
 // --- Cross-process suppression marker --------------------------------------
@@ -165,9 +198,9 @@ export function suppressionMarkerPath(home: string = os.homedir()): string {
  *  dead regardless of what the pid probe says. */
 const DELEGATOR_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
-function readSuppressionMarker(file: string): SuppressionMarker {
+async function readSuppressionMarker(file: string): Promise<SuppressionMarker> {
 	try {
-		const parsed: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
+		const parsed: unknown = JSON.parse(await fs.readFile(file, "utf8"));
 		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { delegators: {} };
 		const delegators = (parsed as SuppressionMarker).delegators;
 		if (!delegators || typeof delegators !== "object" || Array.isArray(delegators)) {
@@ -181,11 +214,20 @@ function readSuppressionMarker(file: string): SuppressionMarker {
 	}
 }
 
-function writeSuppressionMarker(file: string, marker: SuppressionMarker): void {
-	fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+async function writeSuppressionMarker(file: string, marker: SuppressionMarker): Promise<void> {
 	const tmp = `${file}.${process.pid}.tmp`;
-	fs.writeFileSync(tmp, JSON.stringify(marker, null, 2) + "\n", { mode: 0o600 });
-	fs.renameSync(tmp, file);
+	try {
+		await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+		await fs.writeFile(tmp, JSON.stringify(marker, null, 2) + "\n", { mode: 0o600 });
+		await fs.rename(tmp, file);
+	} catch (err) {
+		try {
+			await fs.unlink(tmp);
+		} catch {
+			/* preserve the write/rename error */
+		}
+		throw err;
+	}
 }
 
 function delegatorLive(pid: string, entry: { since?: number } | undefined, isAlive: (pid: number) => boolean, now: number): boolean {
@@ -212,9 +254,9 @@ function hasLiveDelegator(marker: SuppressionMarker, isAlive: (pid: number) => b
 	return Object.entries(marker.delegators).some(([pid, entry]) => delegatorLive(pid, entry, isAlive, now));
 }
 
-function bestEffortWriteMarker(file: string, marker: SuppressionMarker): void {
+async function bestEffortWriteMarker(file: string, marker: SuppressionMarker): Promise<void> {
 	try {
-		writeSuppressionMarker(file, marker);
+		await writeSuppressionMarker(file, marker);
 	} catch {
 		// Coordination hint only; a failed write must never break a release or
 		// a heal. The disabled flags in mcp_config.json remain the gate.
@@ -239,46 +281,56 @@ const suppressionRefs: Map<string, number> = ((globalThis as Record<symbol, unkn
  *  (atomic rename), and a syscall-scale interleave can still briefly re-open
  *  the bridge during a live delegation; both are bounded, self-heal at the
  *  next release/heal, and degrade to the status-quo fail-closed deny. */
-export function acquireBridgeSuppression(opts: SuppressionOptions = {}): () => void {
+export async function acquireBridgeSuppression(opts: SuppressionOptions = {}): Promise<() => Promise<void>> {
 	const configPath = opts.configPath ?? mcpConfigPath();
 	const markerPath = opts.markerPath ?? suppressionMarkerPath();
 	const pid = opts.pid ?? process.pid;
 	const isAlive = opts.isAlive ?? pidAlive;
 	const now = opts.now ?? Date.now;
 	const key = `${path.resolve(markerPath)}\u0000${pid}`;
-	const refs = (suppressionRefs.get(key) ?? 0) + 1;
-	suppressionRefs.set(key, refs);
-	if (refs === 1) {
-		// Marker BEFORE the config flip: a session-start heal racing between
-		// the two writes reads an empty marker and would re-enable entries for
-		// a delegation that is about to go live. Recording first shrinks that
-		// window to the config flip itself.
-		const marker = readSuppressionMarker(markerPath);
-		marker.delegators[String(pid)] = { since: now() };
-		bestEffortWriteMarker(markerPath, marker);
-		setBridgeEntriesDisabled(true, configPath);
-	}
-	let released = false;
-	return () => {
-		if (released) return;
-		released = true;
-		const left = Math.max(0, (suppressionRefs.get(key) ?? 1) - 1);
-		if (left === 0) suppressionRefs.delete(key);
-		else suppressionRefs.set(key, left);
-		if (left === 0) {
-			const marker = readSuppressionMarker(markerPath);
-			delete marker.delegators[String(pid)];
-			const { kept } = pruneDelegators(marker, isAlive, now());
-			bestEffortWriteMarker(markerPath, kept);
-			// Re-read right before the flip: an acquire that raced us between
-			// the marker write and this read is already live and must keep its
-			// suppression (a stale snapshot here would re-enable over it).
-			const fresh = readSuppressionMarker(markerPath);
-			if (Object.keys(fresh.delegators).length === 0) {
-				setBridgeEntriesDisabled(false, configPath);
+	return serializeFile("suppression", markerPath, async () => {
+		const refs = (suppressionRefs.get(key) ?? 0) + 1;
+		suppressionRefs.set(key, refs);
+		try {
+			if (refs === 1) {
+				// Marker BEFORE the config flip: a session-start heal racing between
+				// the two writes reads an empty marker and would re-enable entries for
+				// a delegation that is about to go live. Recording first shrinks that
+				// window to the config flip itself.
+				const marker = await readSuppressionMarker(markerPath);
+				marker.delegators[String(pid)] = { since: now() };
+				await bestEffortWriteMarker(markerPath, marker);
+				await setBridgeEntriesDisabled(true, configPath);
 			}
+		} catch (err) {
+			if (refs === 1) suppressionRefs.delete(key);
+			else suppressionRefs.set(key, refs - 1);
+			throw err;
 		}
-	};
+		let releasePromise: Promise<void> | undefined;
+		return (): Promise<void> => {
+			if (releasePromise) return releasePromise;
+			releasePromise = serializeFile("suppression", markerPath, async () => {
+				const left = Math.max(0, (suppressionRefs.get(key) ?? 1) - 1);
+				if (left === 0) suppressionRefs.delete(key);
+				else suppressionRefs.set(key, left);
+				if (left === 0) {
+					const marker = await readSuppressionMarker(markerPath);
+					delete marker.delegators[String(pid)];
+					const { kept } = pruneDelegators(marker, isAlive, now());
+					await bestEffortWriteMarker(markerPath, kept);
+					// Re-read right before the flip: an acquire that raced us between
+					// the marker write and this read is already live and must keep its
+					// suppression (a stale snapshot here would re-enable over it).
+					const fresh = await readSuppressionMarker(markerPath);
+					if (Object.keys(fresh.delegators).length === 0) {
+						await setBridgeEntriesDisabled(false, configPath);
+					}
+				}
+			});
+			return releasePromise;
+		};
+	});
 }
 
 export interface SuppressionOptions {
@@ -299,24 +351,26 @@ export interface SuppressionOptions {
  *  re-enable here used to un-hide the bridge during another session's active
  *  delegation - a plain session start in a second window could reproduce the
  *  fail-closed deny this file exists to prevent. */
-export function healBridgeSuppression(opts: SuppressionOptions = {}): {
+export async function healBridgeSuppression(opts: SuppressionOptions = {}): Promise<{
 	pruned: string[];
 	reEnabled: boolean;
 	reason?: string;
-} {
+}> {
 	const configPath = opts.configPath ?? mcpConfigPath();
 	const markerPath = opts.markerPath ?? suppressionMarkerPath();
 	const isAlive = opts.isAlive ?? pidAlive;
 	const now = opts.now ?? Date.now;
-	const marker = readSuppressionMarker(markerPath);
-	const { kept, pruned } = pruneDelegators(marker, isAlive, now());
-	if (pruned.length > 0) bestEffortWriteMarker(markerPath, kept);
-	// Decide on a FRESH read, not the pruned snapshot: an acquire that raced
-	// us after our write is already live and must keep its suppression.
-	const fresh = readSuppressionMarker(markerPath);
-	if (Object.keys(fresh.delegators).length > 0) return { pruned, reEnabled: false };
-	const flip = setBridgeEntriesDisabled(false, configPath);
-	return { pruned, reEnabled: flip.changed > 0, reason: flip.reason };
+	return serializeFile("suppression", markerPath, async () => {
+		const marker = await readSuppressionMarker(markerPath);
+		const { kept, pruned } = pruneDelegators(marker, isAlive, now());
+		if (pruned.length > 0) await bestEffortWriteMarker(markerPath, kept);
+		// Decide on a FRESH read, not the pruned snapshot: an acquire that raced
+		// us after our write is already live and must keep its suppression.
+		const fresh = await readSuppressionMarker(markerPath);
+		if (Object.keys(fresh.delegators).length > 0) return { pruned, reEnabled: false };
+		const flip = await setBridgeEntriesDisabled(false, configPath);
+		return { pruned, reEnabled: flip.changed > 0, reason: flip.reason };
+	});
 }
 
 /** Default liveness probe: can the signal be delivered? */
@@ -332,22 +386,24 @@ function pidAlive(pid: number): boolean {
 /** Remove bridge entries whose owning pi process is gone (stale sweep, run
  *  at extension start). Foreign servers and live-pid entries are preserved.
  *  Entries not matching the per-pid name convention are never touched. */
-export function sweepStaleBridgeServers(
+export async function sweepStaleBridgeServers(
 	configPath: string = mcpConfigPath(),
 	isAlive: (pid: number) => boolean = pidAlive,
-): { removed: string[]; reason?: string } {
-	const read = readConfig(configPath);
-	if (!read.ok) return { removed: [], reason: read.reason };
-	const removed: string[] = [];
-	for (const name of Object.keys(read.config.mcpServers)) {
-		const match = /^pi-bridge-(\d+)$/.exec(name);
-		if (!match) continue;
-		const pid = Number(match[1]);
-		if (Number.isFinite(pid) && !isAlive(pid)) {
-			delete read.config.mcpServers[name];
-			removed.push(name);
+): Promise<{ removed: string[]; reason?: string }> {
+	return serializeFile("mcp-config", configPath, async () => {
+		const read = await readConfig(configPath);
+		if (!read.ok) return { removed: [], reason: read.reason };
+		const removed: string[] = [];
+		for (const name of Object.keys(read.config.mcpServers)) {
+			const match = /^pi-bridge-(\d+)$/.exec(name);
+			if (!match) continue;
+			const pid = Number(match[1]);
+			if (Number.isFinite(pid) && !isAlive(pid)) {
+				delete read.config.mcpServers[name];
+				removed.push(name);
+			}
 		}
-	}
-	if (removed.length > 0) writeConfig(configPath, read.config);
-	return { removed };
+		if (removed.length > 0) await writeConfig(configPath, read.config);
+		return { removed };
+	});
 }

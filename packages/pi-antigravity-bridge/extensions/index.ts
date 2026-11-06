@@ -65,7 +65,7 @@ import { setupAuthUrlCapture } from "../src/acp/browser-capture.js";
 import { clearAcpAuthVerified, ensureAcpReady, inspectAcpSetup } from "../src/acp/setup.js";
 import { ensureQueuedMessagesDefaults } from "../src/queued-messages.js";
 import type { TurnDriver, TurnOutcome } from "../src/driver-types.js";
-import { CONFIG_PATH, loadConfig, logsDir, MAX_TURN_CAP_MIN, parseCapMinutes, saveConfig, type AgyMode, type BridgeTools, type Engine, type ThinkingTier } from "../src/config.js";
+import { CONFIG_PATH, loadConfig, loadConfigAsync, logsDir, MAX_TURN_CAP_MIN, parseCapMinutes, saveConfig, type AgyMode, type BridgeTools, type Engine, type ThinkingTier } from "../src/config.js";
 import { agyMissingMessage, ENGINE_SETTINGS_ROW_ID, engineSettingsRow, isAgyInstalled, savedEngineMessage, showEnginePicker, shouldOfferEnginePicker } from "../src/engine-picker.js";
 import { checkAgyCliVersion, describeAgyVersionCheck, MIN_AGY_VERSION } from "../src/agy-version.js";
 import { isValidAgyAgentName, listAgyAgents } from "../src/agents.js";
@@ -208,6 +208,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	// Session-only visibility overrides; never change either application's MCP config.
 	const hiddenBridgeTools = new Set<string>();
 	const getBridgeTools = () => bridgedPiTools(pi.getAllTools(), pi.getActiveTools(), loadConfig().bridgeTools, hiddenBridgeTools);
+	const getBridgeToolsAsync = async (mode?: BridgeTools) => bridgedPiTools(
+		pi.getAllTools(),
+		pi.getActiveTools(),
+		mode ?? (await loadConfigAsync()).bridgeTools,
+		hiddenBridgeTools,
+	);
 	// Approval-gate hook script (per-pid, token embedded). Written at session
 	// start when the gate is active; removed at session_shutdown.
 	let gateScriptPath: string | null = null;
@@ -827,11 +833,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		if (mcpHandle) return; // already running (reload re-fires session_start)
 		// pi loads project skill locations only after the project is trusted;
 		// mirror that gate. Global skill dirs are always scanned.
-		const skills: SkillLite[] = scanSkills(ctx.isProjectTrusted() ? process.cwd() : undefined);
-		const listTools = () => {
+		const skills: SkillLite[] = await scanSkills(ctx.isProjectTrusted() ? process.cwd() : undefined);
+		const listTools = async () => {
 			// /mcp and pi.setActiveTools() update the same live catalog. ACP gets
 			// this endpoint through session/new or session/load; no global config write.
-			const tools = getBridgeTools().map((t) => {
+			const config = await loadConfigAsync();
+			const tools = (await getBridgeToolsAsync(config.bridgeTools)).map((t) => {
 					let inputSchema: object = { type: "object", properties: {}, additionalProperties: true };
 					try {
 						if (t.parameters) inputSchema = JSON.parse(JSON.stringify(t.parameters)) as object;
@@ -840,7 +847,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					}
 					return { name: t.name, description: t.description ?? t.name, inputSchema };
 				});
-			if (skills.length > 0 && loadConfig().bridgeTools !== "none") {
+			if (skills.length > 0 && config.bridgeTools !== "none") {
 				tools.push({
 					name: ACTIVATE_SKILL_TOOL_NAME,
 					description: `Activate a pi Agent Skill by name. Catalog:\n${catalogSummary(skills)}`,
@@ -864,7 +871,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		};
 		// activate_skill never round-trips through pi: the bridge answers it
 		// directly by reading the SKILL.md (pi has no skill tool to execute).
-		const bridgeOnToolCall = (
+		const bridgeOnToolCall = async (
 			callId: string,
 			name: string,
 			args: Record<string, unknown>,
@@ -888,21 +895,20 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			if (name !== ACTIVATE_SKILL_TOOL_NAME) {
 				// A cached MCP catalog is not authorization. An inactive/hidden tool
 				// must not get parked into Pi, even if agy retained its old schema.
-				if (!getBridgeTools().some((tool) => tool.name === name)) {
-					return Promise.resolve({ content: [{ type: "text", text: `Pi tool ${name} is not active or not exposed to Antigravity` }], isError: true });
+				if (!(await getBridgeToolsAsync()).some((tool) => tool.name === name)) {
+					return { content: [{ type: "text", text: `Pi tool ${name} is not active or not exposed to Antigravity` }], isError: true };
 				}
-				return roundTrips.onToolCall(callId, name, args, signal).then((r) => {
-					// Early-ack: answer the HTTP request before agy's ~180s client
-					// deadline with a poll handle; pi keeps executing meanwhile.
-					if (!("escalated" in r)) return r;
-					mcpLog("call-tool-escalated", { name, callId: r.callId });
-					return formatEscalatedAck(r);
-				});
+				const r = await roundTrips.onToolCall(callId, name, args, signal);
+				// Early-ack: answer the HTTP request before agy's ~180s client
+				// deadline with a poll handle; pi keeps executing meanwhile.
+				if (!("escalated" in r)) return r;
+				mcpLog("call-tool-escalated", { name, callId: r.callId });
+				return formatEscalatedAck(r);
 			}
 			const wanted = typeof args.name === "string" ? args.name : "";
-			const skill = loadConfig().bridgeTools !== "none" ? findSkillByName(skills, wanted) : undefined;
-			const body = skill ? readSkillBody(skill) : `unknown skill: ${wanted || "(none given)"}`;
-			return Promise.resolve({
+			const skill = (await loadConfigAsync()).bridgeTools !== "none" ? findSkillByName(skills, wanted) : undefined;
+			const body = skill ? await readSkillBody(skill) : `unknown skill: ${wanted || "(none given)"}`;
+			return {
 				content: [
 					{
 						type: "text",
@@ -910,7 +916,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					},
 				],
 				isError: !skill,
-			});
+			};
 		};
 		const r = await startMcpServer(
 			{
@@ -929,12 +935,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			// Global-config hygiene runs on BOTH engines: a crashed stream-json
 			// session must not leave dead-pid entries or stuck suppression flags
 			// for the next one.
-			sweepStaleBridgeServers();
-			healBridgeSuppression();
+			await sweepStaleBridgeServers();
+			await healBridgeSuppression();
 			// ACP supplies the bridge per-session (session/new | session/load);
 			// only the stream-json CLI reads the global MCP config.
 			if (engine === "stream-json") {
-				registerBridgeServer({
+				await registerBridgeServer({
 					pid: process.pid,
 					port: r.handle.port,
 					token: r.handle.token,
@@ -1065,7 +1071,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		// ("quit") - the connection kill is identical and nothing runs after.
 		await streamDriver.close("recycle", "session shutdown");
 		await acpDriver.close("recycle", "session shutdown");
-		if (engine === "stream-json") unregisterBridgeServer(process.pid);
+		if (engine === "stream-json") await unregisterBridgeServer(process.pid);
 		hiddenBridgeTools.clear();
 		// Approval gate: unstage hooks and remove the per-pid script. Pending
 		// approvals already failed closed via handle close (bridge shutdown deny).

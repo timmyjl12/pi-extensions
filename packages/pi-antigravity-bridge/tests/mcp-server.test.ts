@@ -4,6 +4,8 @@
 import { test, beforeEach, afterEach } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { McpServerHandle, McpBridgeDeps } from "../src/mcp-server.js";
 import {
 	bridgeMcpConfigExists,
@@ -11,6 +13,7 @@ import {
 	createMcpCallHandler,
 	registerExitCleanup,
 	startMcpServer,
+	sweepStaleBridgeDirs,
 	TOKEN_HEADER,
 } from "../src/mcp-server.js";
 
@@ -233,6 +236,39 @@ function bridgeMcpConfigPathForTest(): string {
 	const path = require("node:path") as typeof import("node:path");
 	return path.join(os.homedir(), ".pi", "agent", "antigravity-bridge", `agy-mcp-${process.pid}`, ".agents", "mcp_config.json");
 }
+
+test("mcp-server: stale sweep preserves live, current and foreign entries", async () => {
+	const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-mcp-sweep-"));
+	for (const name of ["agy-mcp-101", "agy-mcp-102", "agy-mcp-103", "agy-mcp-not-a-pid", "foreign"]) {
+		fs.mkdirSync(path.join(baseDir, name));
+	}
+	const removed = await sweepStaleBridgeDirs({
+		baseDir,
+		currentPid: 103,
+		isAlive: (pid) => pid === 102,
+	});
+	assert.deepEqual(removed, ["agy-mcp-101"]);
+	assert.equal(fs.existsSync(path.join(baseDir, "agy-mcp-101")), false);
+	assert.equal(fs.existsSync(path.join(baseDir, "agy-mcp-102")), true);
+	assert.equal(fs.existsSync(path.join(baseDir, "agy-mcp-103")), true);
+	assert.equal(fs.existsSync(path.join(baseDir, "agy-mcp-not-a-pid")), true);
+	assert.equal(fs.existsSync(path.join(baseDir, "foreign")), true);
+	fs.rmSync(baseDir, { recursive: true, force: true });
+});
+
+test("mcp-server: stale sweep honors scan and removal budgets", async () => {
+	const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-mcp-sweep-limit-"));
+	for (const name of ["agy-mcp-201", "agy-mcp-202", "agy-mcp-203"]) fs.mkdirSync(path.join(baseDir, name));
+	const removed = await sweepStaleBridgeDirs({
+		baseDir,
+		isAlive: () => false,
+		maxEntries: 2,
+		maxRemovals: 1,
+	});
+	assert.equal(removed.length, 1);
+	assert.equal(fs.readdirSync(baseDir).length, 2);
+	fs.rmSync(baseDir, { recursive: true, force: true });
+});
 
 beforeEach(() => {
 	/* no shared state beyond the handle */

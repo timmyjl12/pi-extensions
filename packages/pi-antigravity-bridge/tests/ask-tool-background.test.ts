@@ -15,8 +15,8 @@ import { toolModelsFromRaw } from "../src/ask-tool.js";
 const sup = vi.hoisted(() => {
 	const releases: Array<ReturnType<typeof vi.fn>> = [];
 	return {
-		acquireBridgeSuppression: vi.fn(() => {
-			const release = vi.fn();
+		acquireBridgeSuppression: vi.fn(async () => {
+			const release = vi.fn(async () => undefined);
 			releases.push(release);
 			return release;
 		}),

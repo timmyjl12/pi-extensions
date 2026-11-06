@@ -20,6 +20,7 @@
 
 import http from "node:http";
 import fs from "node:fs";
+import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -150,7 +151,7 @@ export async function closeMcpRequestResources(
  *  toolResult on the next stream call. Fail-closed: the provider enforces a
  *  480s timeout and rejects when no agy turn is active. */
 export interface McpBridgeDeps {
-	listTools(): Array<{ name: string; description: string; inputSchema: object }>;
+	listTools(): Array<{ name: string; description: string; inputSchema: object }> | Promise<Array<{ name: string; description: string; inputSchema: object }>>;
 	onToolCall(
 		callId: string,
 		name: string,
@@ -216,32 +217,50 @@ function isPidAlive(pid: number): boolean {
 	}
 }
 
-/** Best-effort cleanup of stale per-pid dirs left by crashed sessions. */
-function sweepStaleBridgeDirs(): void {
-	let entries: string[];
+const STALE_BRIDGE_SCAN_LIMIT = 256;
+const STALE_BRIDGE_REMOVAL_LIMIT = 32;
+
+/** Best-effort, bounded cleanup of stale per-pid dirs left by crashed sessions.
+ *  opendir streams entries instead of materializing an unbounded directory. */
+export async function sweepStaleBridgeDirs(opts: {
+	baseDir?: string;
+	isAlive?: (pid: number) => boolean;
+	currentPid?: number;
+	maxEntries?: number;
+	maxRemovals?: number;
+} = {}): Promise<string[]> {
+	const baseDir = opts.baseDir ?? BRIDGE_BASE;
+	const isAlive = opts.isAlive ?? isPidAlive;
+	const currentPid = opts.currentPid ?? process.pid;
+	const maxEntries = opts.maxEntries ?? STALE_BRIDGE_SCAN_LIMIT;
+	const maxRemovals = opts.maxRemovals ?? STALE_BRIDGE_REMOVAL_LIMIT;
+	const removed: string[] = [];
+	let scanned = 0;
 	try {
-		entries = fs.readdirSync(BRIDGE_BASE);
-	} catch {
-		return;
-	}
-	for (const name of entries) {
-		if (!name.startsWith("agy-mcp-")) continue;
-		const pid = Number(name.slice("agy-mcp-".length));
-		if (!Number.isInteger(pid) || pid === process.pid) continue;
-		if (isPidAlive(pid)) continue;
-		try {
-			fs.rmSync(path.join(BRIDGE_BASE, name), { recursive: true, force: true });
-		} catch {
-			/* best effort */
+		for await (const entry of await fsp.opendir(baseDir)) {
+			if (scanned >= maxEntries || removed.length >= maxRemovals) break;
+			scanned++;
+			const name = entry.name;
+			if (!name.startsWith("agy-mcp-")) continue;
+			const pid = Number(name.slice("agy-mcp-".length));
+			if (!Number.isInteger(pid) || pid === currentPid || isAlive(pid)) continue;
+			try {
+				await fsp.rm(path.join(baseDir, name), { recursive: true, force: true });
+				removed.push(name);
+			} catch {
+				/* best effort: the next startup retries */
+			}
 		}
+	} catch {
+		// Missing/unreadable base or an iteration failure: cleanup stays best effort.
 	}
+	return removed;
 }
 
 /** Write our .agents/mcp_config.json (serverUrl + shared-secret header) so a
  *  provider agy that adds this dir via --add-dir discovers us. Atomic write. */
-function writeBridgeMcpConfig(port: number, token: string): void {
+async function writeBridgeMcpConfig(port: number, token: string): Promise<void> {
 	const cfgPath = bridgeMcpConfigPath();
-	fs.mkdirSync(path.dirname(cfgPath), { recursive: true, mode: 0o700 });
 	const cfg = {
 		mcpServers: {
 			[BRIDGE_MCP_KEY]: {
@@ -252,25 +271,33 @@ function writeBridgeMcpConfig(port: number, token: string): void {
 	};
 	const tmp = `${cfgPath}.${process.pid}.tmp`;
 	try {
-		fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
-		fs.renameSync(tmp, cfgPath);
+		await fsp.mkdir(path.dirname(cfgPath), { recursive: true, mode: 0o700 });
+		await fsp.writeFile(tmp, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
+		await fsp.rename(tmp, cfgPath);
 	} catch (err) {
 		try {
-			fs.unlinkSync(tmp);
+			await fsp.unlink(tmp);
 		} catch {
-			/* nothing */
+			/* preserve the write/rename error */
 		}
 		throw err;
 	}
 }
 
-/** Remove this process's config dir. Safe to delete unconditionally: only this
- *  pid owns it. */
-function removeBridgeMcpConfig(): void {
+/** Normal shutdown can await removal; process exit uses the sync fallback below. */
+async function removeBridgeMcpConfig(): Promise<void> {
+	try {
+		await fsp.rm(bridgeMcpConfigDir(), { recursive: true, force: true });
+	} catch {
+		/* best effort */
+	}
+}
+
+function removeBridgeMcpConfigAtExit(): void {
 	try {
 		fs.rmSync(bridgeMcpConfigDir(), { recursive: true, force: true });
 	} catch {
-		/* best effort */
+		/* process exit cannot await; next-launch sweep is the backstop */
 	}
 }
 
@@ -423,7 +450,7 @@ export async function startMcpServer(
 	const approvalTimeoutMs = opts.approvalTimeoutMs ?? APPROVAL_PARK_TIMEOUT_MS;
 
 	const listHandler = async () => {
-		const tools = deps.listTools();
+		const tools = await deps.listTools();
 		log("list-tools", { count: tools.length });
 		return { tools };
 	};
@@ -444,7 +471,7 @@ export async function startMcpServer(
 	// custom headers on a simple cross-origin POST, so this blocks web CSRF
 	// against the loopback server; local clients need the token too.
 	const token = crypto.randomUUID();
-	sweepStaleBridgeDirs();
+	await sweepStaleBridgeDirs();
 
 	// --- approval park (docs/TODO.md 2.5) ------------------------------------
 	// Ticket -> parked approval. A settled ticket STAYS in the map until its
@@ -688,43 +715,48 @@ export async function startMcpServer(
 		});
 
 		httpServer.listen(opts.preferredPort ?? 0, "127.0.0.1", () => {
-			const addr = httpServer.address();
-			const port = typeof addr === "object" && addr ? addr.port : 0;
-			if (!port) {
-				resolve({ ok: false, reason: "failed to bind" });
-				return;
-			}
-			try {
-				writeBridgeMcpConfig(port, token);
-				log("bridge-config-written", { port, path: bridgeMcpConfigPath() });
-			} catch (e) {
-				log("bridge-config-write-failed", e instanceof Error ? e.message : String(e));
-			}
-			// Clean up the config dir on abrupt termination (SIGINT/SIGTERM/crash)
-			// where session_shutdown -> close() does not run. Disposed in close().
-			const disposeExitCleanup = registerExitCleanup(removeBridgeMcpConfig);
-			log("listening", { port });
-			resolve({
-				ok: true,
-				port,
-				handle: {
+			void (async () => {
+				const addr = httpServer.address();
+				const port = typeof addr === "object" && addr ? addr.port : 0;
+				if (!port) {
+					resolve({ ok: false, reason: "failed to bind" });
+					return;
+				}
+				try {
+					await writeBridgeMcpConfig(port, token);
+					log("bridge-config-written", { port, path: bridgeMcpConfigPath() });
+				} catch (e) {
+					log("bridge-config-write-failed", e instanceof Error ? e.message : String(e));
+				}
+				// Clean up the config dir on abrupt termination (SIGINT/SIGTERM/crash)
+				// where session_shutdown -> close() does not run. Disposed in close().
+				const disposeExitCleanup = registerExitCleanup(removeBridgeMcpConfigAtExit);
+				log("listening", { port });
+				resolve({
+					ok: true,
 					port,
-					token,
-					approvals: approvalsApi,
-					close: async () => {
-						// Pending approvals fail closed on shutdown: the hook gets a
-						// terminal deny instead of a 404 on its next poll.
-						for (const [ticket, p] of [...parks]) {
-							if (p.terminal) continue;
-							settlePark(ticket, { allow: false, reason: "approval gate bridge shut down" });
-						}
-						await new Promise<void>((r) => httpServer.close(() => r()));
-						removeBridgeMcpConfig();
-						disposeExitCleanup();
-						log("bridge-config-removed", { port });
-						log("closed", { port });
+					handle: {
+						port,
+						token,
+						approvals: approvalsApi,
+						close: async () => {
+							// Pending approvals fail closed on shutdown: the hook gets a
+							// terminal deny instead of a 404 on its next poll.
+							for (const [ticket, p] of [...parks]) {
+								if (p.terminal) continue;
+								settlePark(ticket, { allow: false, reason: "approval gate bridge shut down" });
+							}
+							await new Promise<void>((r) => httpServer.close(() => r()));
+							await removeBridgeMcpConfig();
+							disposeExitCleanup();
+							log("bridge-config-removed", { port });
+							log("closed", { port });
+						},
 					},
-				},
+				});
+			})().catch((e) => {
+				log("startup-error", e instanceof Error ? e.message : String(e));
+				resolve({ ok: false, reason: `bridge startup failed: ${e instanceof Error ? e.message : String(e)}` });
 			});
 		});
 	});

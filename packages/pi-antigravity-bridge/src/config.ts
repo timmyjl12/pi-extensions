@@ -11,6 +11,7 @@
 // and one-off runs can force a setting without editing the file.
 
 import fs from "node:fs";
+import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { normalizeAgyAgentName } from "./agents.js";
@@ -255,10 +256,8 @@ function readConfigFile(configPath: string): Partial<AgyConfig> {
 	return {};
 }
 
-/** Load config merged over defaults. Env vars override the file when set. */
-export function loadConfig(configPath: string = CONFIG_PATH): AgyConfig {
-	let file: Partial<AgyConfig> = readConfigFile(configPath);
-
+/** Resolve config merged over defaults. Env vars override the file when set. */
+function resolveConfig(file: Partial<AgyConfig>, freshInstall: boolean): AgyConfig {
 	// Env overrides file (matches the skipPermissions pattern).
 	// The naive OR `env === "plan" || file.mode === "plan"` would ignore an
 	// explicit AGY_MODE=accept-edits when the file says plan, violating the
@@ -269,9 +268,9 @@ export function loadConfig(configPath: string = CONFIG_PATH): AgyConfig {
 	// existing install (saveConfig persists the resolved legacy engine), and
 	// the acp default is for new installs only - an existing install keeps
 	// the legacy stream-json engine instead of silently starting the ~1.5 GB
-	// acp download. existsSync is false on EACCES too, which reads as fresh
-	// and picks acp; an unreadable config dir is a broken install either way.
-	const freshInstall = !fs.existsSync(configPath);
+	// acp download. The synchronous loader's existsSync is false on EACCES too,
+	// which reads as fresh and picks acp; an unreadable config dir is a broken
+	// install either way. The async loader applies the same existence rule.
 	const engineFallback = freshInstall || file.engine !== undefined ? DEFAULT_ENGINE : "stream-json";
 	const engine = narrowEngine(String(process.env.AGY_ENGINE ?? file.engine ?? engineFallback).toLowerCase());
 
@@ -411,6 +410,91 @@ export function loadConfig(configPath: string = CONFIG_PATH): AgyConfig {
 		approvals: { gateMode, mode: gateAskMode },
 		patchCleanupNotified: file.patchCleanupNotified === true,
 	};
+}
+
+/** Synchronous startup/command loader. Kept for extension initialization and
+ *  other synchronous UI contracts; MCP/request paths use loadConfigAsync. */
+export function loadConfig(configPath: string = CONFIG_PATH): AgyConfig {
+	return resolveConfig(readConfigFile(configPath), !fs.existsSync(configPath));
+}
+
+interface ConfigFileSnapshot {
+	identity: string;
+	file: Partial<AgyConfig>;
+	freshInstall: boolean;
+}
+
+const configFileCache = new Map<string, ConfigFileSnapshot>();
+const configFileReads = new Map<string, { identity: string; promise: Promise<ConfigFileSnapshot> }>();
+
+function configIdentity(stat: { dev: number; ino: number; mtimeMs: number; size: number }): string {
+	return `${stat.dev}:${stat.ino}:${stat.mtimeMs}:${stat.size}`;
+}
+
+async function configFileExists(configPath: string): Promise<boolean> {
+	try {
+		await fsp.access(configPath);
+		return true;
+	} catch {
+		// Missing or inaccessible: the legacy loader treats both as fresh.
+		return false;
+	}
+}
+
+async function readConfigSnapshot(configPath: string, identity: string): Promise<ConfigFileSnapshot> {
+	let raw: string;
+	try {
+		raw = await fsp.readFile(configPath, "utf8");
+	} catch {
+		return { identity, file: {}, freshInstall: !(await configFileExists(configPath)) };
+	}
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+			return { identity, file: parsed as Partial<AgyConfig>, freshInstall: false };
+		}
+	} catch {
+		// Corrupt JSON is a readable existing file: legacy engine continuity
+		// still applies while every other value falls back to defaults.
+	}
+	return { identity, file: {}, freshInstall: false };
+}
+
+/** Async hot-path loader. stat() is cheap compared with parsing the whole file
+ *  on every tools/list/tools/call; unchanged dev/ino/mtime/size reuses the raw
+ *  parsed snapshot while env overrides and TTY defaults still resolve per call.
+ *  Concurrent changes to the same identity share one read. */
+export async function loadConfigAsync(configPath: string = CONFIG_PATH): Promise<AgyConfig> {
+	const key = path.resolve(configPath);
+	let identity: string;
+	try {
+		identity = configIdentity(await fsp.stat(configPath));
+	} catch {
+		identity = "missing";
+	}
+
+	const cached = configFileCache.get(key);
+	if (cached?.identity === identity) return resolveConfig(cached.file, cached.freshInstall);
+	if (identity === "missing") {
+		const snapshot: ConfigFileSnapshot = { identity, file: {}, freshInstall: true };
+		configFileCache.set(key, snapshot);
+		return resolveConfig(snapshot.file, snapshot.freshInstall);
+	}
+
+	const pending = configFileReads.get(key);
+	if (pending?.identity === identity) {
+		const snapshot = await pending.promise;
+		return resolveConfig(snapshot.file, snapshot.freshInstall);
+	}
+
+	const promise = readConfigSnapshot(configPath, identity);
+	configFileReads.set(key, { identity, promise });
+	const snapshot = await promise;
+	if (configFileReads.get(key)?.promise === promise) {
+		configFileCache.set(key, snapshot);
+		configFileReads.delete(key);
+	}
+	return resolveConfig(snapshot.file, snapshot.freshInstall);
 }
 
 /** Narrow a raw engine string to the known set; anything unknown (incl. the

@@ -19,7 +19,7 @@
 // subscription bills all of these through agy.
 
 import { spawn } from "node:child_process";
-import fs from "node:fs";
+import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { terminateProcessTree, trackSpawnedIdentity } from "./process-tree.js";
@@ -212,9 +212,9 @@ interface ModelsCache {
 }
 
 /** Read and validate the models cache. Returns null when missing or corrupt. */
-function readModelsCache(cachePath: string = MODELS_CACHE_PATH): ModelsCache | null {
+async function readModelsCache(cachePath: string = MODELS_CACHE_PATH): Promise<ModelsCache | null> {
 	try {
-		const parsed = JSON.parse(fs.readFileSync(cachePath, "utf8")) as unknown;
+		const parsed = JSON.parse(await fs.readFile(cachePath, "utf8")) as unknown;
 		if (
 			parsed &&
 			typeof parsed === "object" &&
@@ -232,21 +232,41 @@ function readModelsCache(cachePath: string = MODELS_CACHE_PATH): ModelsCache | n
 
 /** Atomically persist the raw catalog text (temp + rename, mode 0o600).
  *  Best-effort: a write failure just means the next load re-spawns. */
-function writeModelsCache(raw: string, cachePath: string = MODELS_CACHE_PATH): void {
-	fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+async function writeModelsCache(raw: string, cachePath: string = MODELS_CACHE_PATH): Promise<void> {
 	const tmp = `${cachePath}.${process.pid}.tmp`;
 	try {
-		fs.writeFileSync(tmp, JSON.stringify({ raw, savedAt: Date.now() }, null, 2) + "\n", {
+		await fs.mkdir(path.dirname(cachePath), { recursive: true });
+		await fs.writeFile(tmp, JSON.stringify({ raw, savedAt: Date.now() }, null, 2) + "\n", {
 			mode: 0o600,
 		});
-		fs.renameSync(tmp, cachePath);
+		await fs.rename(tmp, cachePath);
 	} catch {
 		try {
-			fs.unlinkSync(tmp);
+			await fs.unlink(tmp);
 		} catch {
 			/* nothing to clean */
 		}
 	}
+}
+
+// A cold load and a stale-cache background refresh can request the same file at
+// once. Share one discovery/write per cache path so they neither spawn duplicate
+// agy processes nor race a common temp file.
+const modelRefreshes = new Map<string, Promise<string>>();
+
+function refreshModelCache(binary: string, cachePath: string): Promise<string> {
+	const key = path.resolve(cachePath);
+	const existing = modelRefreshes.get(key);
+	if (existing) return existing;
+	const refresh = (async () => {
+		const raw = await spawnAgyModelsRaw(binary);
+		if (raw) await writeModelsCache(raw, cachePath);
+		return raw;
+	})().finally(() => {
+		if (modelRefreshes.get(key) === refresh) modelRefreshes.delete(key);
+	});
+	modelRefreshes.set(key, refresh);
+	return refresh;
 }
 
 /** Fire-and-forget refresh of the models cache. Called on a stale-cache load so
@@ -255,13 +275,9 @@ export function refreshModelsInBackground(
 	binary: string,
 	cachePath: string = MODELS_CACHE_PATH,
 ): void {
-	void spawnAgyModelsRaw(binary)
-		.then((raw) => {
-			if (raw) writeModelsCache(raw, cachePath);
-		})
-		.catch(() => {
-			/* best effort: leave the stale cache in place */
-		});
+	void refreshModelCache(binary, cachePath).catch(() => {
+		/* best effort: leave the stale cache in place */
+	});
 }
 
 /** Load the raw `agy models` text for catalog derivation, optimized for load
@@ -278,16 +294,14 @@ export async function loadModelCatalogRaw(
 	binary: string,
 	cachePath: string = MODELS_CACHE_PATH,
 ): Promise<string> {
-	const cache = readModelsCache(cachePath);
+	const cache = await readModelsCache(cachePath);
 	if (cache) {
 		if (Date.now() - cache.savedAt < MODELS_CACHE_TTL_MS) return cache.raw;
 		refreshModelsInBackground(binary, cachePath);
 		return cache.raw;
 	}
-	// No cache: populate it. Blocks once; later loads hit the cache above.
-	const raw = await spawnAgyModelsRaw(binary);
-	if (raw) writeModelsCache(raw, cachePath);
-	return raw;
+	// No cache: populate it. Concurrent cold loads share this single flight.
+	return refreshModelCache(binary, cachePath);
 }
 
 /** Parse raw `agy models` text into the provider's model entries.

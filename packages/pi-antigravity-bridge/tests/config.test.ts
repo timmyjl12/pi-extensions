@@ -1,12 +1,12 @@
 // Config tests: engine + bridgeTools knobs round-trip through load/save and
 // unrelated saves never clobber them (the merge regression class).
 
-import { test } from "vitest";
+import { test, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { loadConfig, saveConfig } from "../src/config.js";
+import { loadConfig, loadConfigAsync, saveConfig } from "../src/config.js";
 
 function tmpConfig(): string {
 	return path.join(fs.mkdtempSync(path.join(os.tmpdir(), "agy-cfg-")), "config.json");
@@ -215,6 +215,50 @@ test("config: AGY_TURN_TIMEOUT_MIN env overrides the file, 0 disables", () => {
 	} finally {
 		if (prev === undefined) delete process.env.AGY_TURN_TIMEOUT_MIN;
 		else process.env.AGY_TURN_TIMEOUT_MIN = prev;
+		fs.rmSync(path.dirname(p), { recursive: true, force: true });
+	}
+});
+
+test("config: async loader shares cold reads and caches an unchanged file identity", async () => {
+	const p = tmpConfig();
+	fs.writeFileSync(p, JSON.stringify({ mode: "plan", bridgeTools: "mcp" }));
+	const read = vi.spyOn(fs.promises, "readFile");
+	const prev = process.env.AGY_MODE;
+	try {
+		const [first, concurrent] = await Promise.all([loadConfigAsync(p), loadConfigAsync(p)]);
+		assert.equal(first.mode, "plan");
+		assert.equal(concurrent.bridgeTools, "mcp");
+		assert.equal(read.mock.calls.filter(([file]) => String(file) === p).length, 1);
+
+		await loadConfigAsync(p);
+		assert.equal(read.mock.calls.filter(([file]) => String(file) === p).length, 1, "same stat identity reuses the parse");
+		process.env.AGY_MODE = "accept-edits";
+		assert.equal((await loadConfigAsync(p)).mode, "accept-edits", "env still resolves per call");
+	} finally {
+		if (prev === undefined) delete process.env.AGY_MODE;
+		else process.env.AGY_MODE = prev;
+		read.mockRestore();
+		fs.rmSync(path.dirname(p), { recursive: true, force: true });
+	}
+});
+
+test("config: async loader observes replacement and preserves corrupt-file behavior", async () => {
+	const p = tmpConfig();
+	try {
+		fs.writeFileSync(p, JSON.stringify({ mode: "plan" }));
+		assert.equal((await loadConfigAsync(p)).mode, "plan");
+		fs.writeFileSync(p, JSON.stringify({ mode: "accept-edits", digest: true }));
+		const changed = await loadConfigAsync(p);
+		assert.equal(changed.mode, "accept-edits");
+		assert.equal(changed.digest, true);
+
+		fs.writeFileSync(p, "{broken");
+		const corrupt = await loadConfigAsync(p);
+		assert.equal(corrupt.mode, "accept-edits");
+		assert.equal(corrupt.engine, "stream-json", "readable corrupt file is still an existing legacy install");
+		fs.rmSync(p);
+		assert.equal((await loadConfigAsync(p)).engine, "acp");
+	} finally {
 		fs.rmSync(path.dirname(p), { recursive: true, force: true });
 	}
 });
