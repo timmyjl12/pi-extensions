@@ -739,11 +739,12 @@ export class StreamDriver implements TurnDriver {
 	async #turnDeadlineGuard(turn: ActiveTurn, label: "timeout" | "stall", message: string): Promise<void> {
 		if (turn.closed) return;
 		this.#log(`${label}:${turn.id}`);
+		const firedAt = Date.now();
 		await this.#killChild();
 		let parked: string | undefined;
 		try {
 			parked = turn.conversationId
-				? await parkedTurnAnswer(turn.conversationId, turn.startedAt)
+				? await parkedTurnAnswer(turn.conversationId, turn.startedAt, undefined, firedAt)
 				: undefined;
 		} catch {
 			parked = undefined; // the guard must never throw

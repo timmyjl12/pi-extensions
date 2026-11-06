@@ -46,6 +46,31 @@ test("extractParkedAnswer: two-second clock tolerance accepts a just-before step
 	assert.equal(extractParkedAnswer(tail, START), "fresh answer");
 });
 
+test("extractParkedAnswer: a response created after the deadline is rejected", () => {
+	const cutoff = Date.parse("2026-09-08T16:11:42Z");
+	const tail = `${doneStep("too late", "2026-09-08T16:11:45Z")}\n`;
+	assert.equal(extractParkedAnswer(tail, START, cutoff), undefined);
+});
+
+test("extractParkedAnswer: a response at the cutoff plus tolerance is accepted", () => {
+	const cutoff = Date.parse("2026-09-08T16:11:42Z");
+	const tail = `${doneStep("before deadline", "2026-09-08T16:11:43.5Z")}\n`;
+	assert.equal(extractParkedAnswer(tail, START, cutoff), "before deadline");
+});
+
+test("parkedTurnAnswer: cutoff is applied to the transcript", async () => {
+	const home = fs.mkdtempSync(path.join(os.tmpdir(), "agy-home-"));
+	try {
+		const logDir = path.join(home, ".gemini", "antigravity-cli", "brain", "conv-1", ".system_generated", "logs");
+		fs.mkdirSync(logDir, { recursive: true });
+		fs.writeFileSync(path.join(logDir, "transcript_full.jsonl"), `${doneStep("too late", "2026-09-08T16:11:45Z")}\n`);
+		const cutoff = Date.parse("2026-09-08T16:11:42Z");
+		assert.equal(await parkedTurnAnswer("conv-1", START, home, cutoff), undefined);
+	} finally {
+		fs.rmSync(home, { recursive: true, force: true });
+	}
+});
+
 test("extractParkedAnswer: non-DONE, non-MODEL, non-response and empty steps ignored", () => {
 	const lines = [
 		JSON.stringify({ source: "MODEL", type: "PLANNER_RESPONSE", status: "RUN", created_at: "2026-09-08T16:11:43Z", content: "x" }),

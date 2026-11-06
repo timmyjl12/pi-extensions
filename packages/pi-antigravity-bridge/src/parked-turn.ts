@@ -46,6 +46,7 @@ const CREATED_AT_TOLERANCE_MS = 2_000;
 export function extractParkedAnswer(
 	tail: string,
 	turnStartedMs: number,
+	turnCutoffMs = Number.POSITIVE_INFINITY,
 ): string | undefined {
 	const lines = tail.split("\n");
 	for (let i = lines.length - 1; i >= 0; i -= 1) {
@@ -68,6 +69,10 @@ export function extractParkedAnswer(
 		const createdAtMs = Date.parse(step.created_at);
 		if (Number.isNaN(createdAtMs)) continue;
 		if (createdAtMs < turnStartedMs - CREATED_AT_TOLERANCE_MS) break;
+		// A response that only landed after the deadline was still in flight when
+		// the deadline fired; it must not turn a stalled turn into a success merely
+		// because process-tree teardown took time to finish.
+		if (createdAtMs > turnCutoffMs + CREATED_AT_TOLERANCE_MS) return undefined;
 
 		// The newest step written during this turn must be a completed MODEL
 		// response without tool calls. Intermediate tool steps, errors, or
@@ -117,9 +122,10 @@ export async function parkedTurnAnswer(
 	conversationId: string,
 	turnStartedMs: number,
 	home: string | undefined = undefined,
+	turnCutoffMs = Number.POSITIVE_INFINITY,
 ): Promise<string | undefined> {
 	const transcript = `${agyConversationDir("stream-json", conversationId, home)}/.system_generated/logs/transcript_full.jsonl`;
 	const tail = await readTranscriptTail(transcript, PARKED_PROBE_MAX_BYTES);
 	if (tail === "") return undefined;
-	return extractParkedAnswer(tail, turnStartedMs);
+	return extractParkedAnswer(tail, turnStartedMs, turnCutoffMs);
 }
