@@ -27,6 +27,11 @@ import path from "node:path";
 import { parseAuthPort, readLastUrl } from "./browser-capture.js";
 import { frameCarriesUsage } from "./events.js";
 import type { AgyUsage } from "../driver-types.js";
+import {
+	PROCESS_KILL_TIMEOUT_MS,
+	terminateProcessTree,
+	trackSpawnedIdentity,
+} from "../process-tree.js";
 import { redactText } from "../redact.js";
 import { JsonRpcResponseError, JsonRpcSession } from "./jsonrpc.js";
 
@@ -92,6 +97,11 @@ export interface AcpConnectionOptions {
 	 *  wrapper records it there; the connection watches the file and logs
 	 *  "auth-url" {url, port} for every new URL. */
 	authUrlFile?: string;
+	/** Test seam for injected process identity/termination. Production uses
+	 *  terminateProcessTree with POSIX process-group semantics. */
+	terminateProcess?: (child: ChildProcess, signal: NodeJS.Signals) => Promise<void>;
+	/** Outer observation bound; shared taskkill/CIM calls have their own 5s cap. */
+	disposeTimeoutMs?: number;
 }
 
 const INIT_TIMEOUT_MS = 30_000;
@@ -133,6 +143,7 @@ export class AcpConnection {
 	#exactUsageSeen = false;
 	#exited = false;
 	#killed = false;
+	#termination: Promise<void> | undefined;
 	#suppressUpdates = false;
 	#updateSessionId: string | null = null;
 	agentInfo: Record<string, unknown> | undefined;
@@ -190,13 +201,14 @@ export class AcpConnection {
 	async start(): Promise<void> {
 		if (this.#child) return;
 		const args = [...(this.#opts.binArgs ?? [])];
-		const child = spawn(this.#opts.bin, args, {
+		const spawnedAtMs = Date.now();
+		const child = trackSpawnedIdentity(spawn(this.#opts.bin, args, {
 			cwd: this.#opts.cwd,
 			stdio: ["pipe", "pipe", "pipe"],
 			detached: process.platform !== "win32",
 			windowsHide: true,
 			...(this.#opts.extraEnv ? { env: { ...process.env, ...this.#opts.extraEnv } } : {}),
-		});
+		}), this.#opts.bin, spawnedAtMs);
 		this.#child = child;
 		if (this.#opts.authUrlFile) this.#watchAuthUrl();
 		child.stdout?.setEncoding("utf8");
@@ -221,16 +233,7 @@ export class AcpConnection {
 				// binary may be a wrapper script with live descendants.
 				this.#opts.log("frame-overflow", { detail });
 				this.#finish(`stdout frame overflow: ${detail}`);
-				const child = this.#child;
-				try {
-					if (child?.pid && process.platform !== "win32") {
-						process.kill(-child.pid, "SIGKILL");
-					} else {
-						child?.kill("SIGKILL");
-					}
-				} catch {
-					/* already gone */
-				}
+				this.#kill("SIGKILL");
 			},
 		});
 		this.#rpc = rpc;
@@ -533,28 +536,67 @@ export class AcpConnection {
 		this.#rpc?.abortAll(reason);
 	}
 	kill(): void {
-		if (this.#killed) return;
-		this.#killed = true;
-		this.abortAll("connection killed");
-		const child = this.#child;
-		if (!child || this.#exited) return;
-		this.#opts.log("kill", { pid: child.pid ?? "?" });
-		try {
-			if (child.pid && process.platform !== "win32") {
-				process.kill(-child.pid, "SIGTERM");
-				setTimeout(() => {
-					try {
-						if (!this.#exited && child.pid) process.kill(-child.pid, "SIGKILL");
-					} catch {
-						/* already gone */
-					}
-				}, 750);
-			} else {
-				child.kill("SIGTERM");
-			}
-		} catch {
-			/* already gone */
+		this.#kill("SIGTERM");
+	}
+
+	/** Idempotent bounded disposal for async shutdown owners. kill() remains
+	 *  the fire-and-forget abort path; both share the same termination promise. */
+	dispose(): Promise<void> {
+		this.kill();
+		return this.#termination ?? Promise.resolve();
+	}
+
+	#kill(signal: NodeJS.Signals): void {
+		if (!this.#killed) {
+			this.#killed = true;
+			this.abortAll("connection killed");
+			this.#opts.log("kill", { pid: this.#child?.pid ?? "?" });
 		}
+		void this.#terminateChild(signal);
+	}
+
+	#terminateChild(signal: NodeJS.Signals): Promise<void> {
+		if (this.#termination) return this.#termination;
+		const child = this.#child;
+		if (!child) {
+			this.#termination = Promise.resolve();
+			return this.#termination;
+		}
+		let timeout: NodeJS.Timeout | undefined;
+		const timeoutMs = this.#opts.disposeTimeoutMs ?? PROCESS_KILL_TIMEOUT_MS + 1_000;
+		const bounded = new Promise<void>((resolve) => {
+			timeout = setTimeout(() => {
+				this.#opts.log("dispose-timeout", { pid: child.pid ?? "?", timeoutMs });
+				resolve();
+			}, timeoutMs);
+			timeout.unref();
+		});
+		const termination = Promise.resolve().then(() => {
+			if (this.#opts.terminateProcess) return this.#opts.terminateProcess(child, signal);
+			return terminateProcessTree(child, {
+				posixGroup: true,
+				signal,
+				onError: (err) => this.#opts.log("kill-error", {
+					message: redactText(err instanceof Error ? err.message : String(err)),
+				}),
+			});
+		});
+		this.#termination = (async () => {
+			try {
+				await Promise.race([termination, bounded]);
+			} catch (err) {
+				this.#opts.log("kill-error", {
+					message: redactText(err instanceof Error ? err.message : String(err)),
+				});
+			} finally {
+				if (timeout) clearTimeout(timeout);
+				// Bound waiting even for an exited root with inherited pipes.
+				child.stdin?.destroy();
+				child.stdout?.destroy();
+				child.stderr?.destroy();
+			}
+		})();
+		return this.#termination;
 	}
 
 	/** Surface OAuth login URLs captured by the BROWSER wrapper: every new

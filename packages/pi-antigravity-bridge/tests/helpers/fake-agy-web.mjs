@@ -30,6 +30,32 @@ if (mode === "slow") {
 	setTimeout(() => {
 		line({ event: "result", result: { status: "SUCCESS", response: "TOO LATE" } });
 	}, 400);
+} else if (mode === "split-unicode") {
+	line({ event: "init", init: { cwd: process.cwd(), agent } });
+	step("search_web", "DONE");
+	const payload = Buffer.from(`${JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "FAKE 😀 漢字" } })}\n`, "utf8");
+	// Split inside the four-byte emoji, not merely between JSON tokens.
+	const splitAt = payload.indexOf(Buffer.from("😀", "utf8")) + 2;
+	process.stdout.write(payload.subarray(0, splitAt));
+	setTimeout(() => process.stdout.write(payload.subarray(splitAt)), 20);
+} else if (mode === "overflow" || mode === "unexpected-flood") {
+	line({ event: "init", init: { cwd: process.cwd(), agent } });
+	step(mode === "unexpected-flood" ? "run_command" : "search_web", "ACTIVE");
+	// Keep writing after the host must fail. There is deliberately no NDJSON
+	// newline, so early-return retention is exercised as well as the total cap.
+	let remaining = 4 * 1024 * 1024;
+	const flood = () => {
+		if (remaining <= 0) return;
+		const size = Math.min(64 * 1024, remaining);
+		remaining -= size;
+		process.stdout.write("x".repeat(size), () => setImmediate(flood));
+	};
+	flood();
+} else if (mode === "partial-result") {
+	line({ event: "init", init: { cwd: process.cwd(), agent } });
+	step("search_web", "DONE");
+	const complete = `${JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "MUST NOT EMIT" } })}\n`;
+	process.stdout.write(complete.slice(0, -3));
 } else {
 	line({ event: "init", init: { cwd: process.cwd(), agent, tools: ["search_web", "read_url_content"] } });
 	const tool = mode === "ok-read" || mode === "read-no-fetch" ? "read_url_content" : "search_web";

@@ -22,6 +22,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { terminateProcessTree, trackSpawnedIdentity } from "./process-tree.js";
 import type { Api, Model, ThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
 
 const DISCOVERY_TIMEOUT_MS = 8_000;
@@ -137,10 +138,16 @@ export async function spawnAgyRaw(
 ): Promise<string> {
 	try {
 		return await new Promise<string>((resolve, reject) => {
-			const proc = spawn(binary, args, {
+			const spawnedAtMs = Date.now();
+			const proc = trackSpawnedIdentity(spawn(binary, args, {
 				stdio: ["ignore", "pipe", "ignore"],
 				shell: false,
-			});
+			}), binary, spawnedAtMs);
+			let termination: Promise<void> | undefined;
+			const terminate = (): Promise<void> => {
+				termination ??= terminateProcessTree(proc, { signal: "SIGKILL" });
+				return termination;
+			};
 			proc.stdout?.setEncoding("utf8");
 			let out = "";
 			let done = false;
@@ -155,11 +162,7 @@ export async function spawnAgyRaw(
 				if (capped) return;
 				if (out.length + d.length > capBytes) {
 					capped = true;
-					try {
-						proc.kill("SIGKILL");
-					} catch {
-						/* already gone */
-					}
+					void terminate();
 					finish("");
 					return;
 				}
@@ -171,11 +174,7 @@ export async function spawnAgyRaw(
 			});
 			proc.on("close", (code) => finish(code === 0 ? out : ""));
 			const watchdog = setTimeout(() => {
-				try {
-					proc.kill("SIGKILL");
-				} catch {
-					/* already gone */
-				}
+				void terminate();
 				finish("");
 			}, timeoutMs);
 		});

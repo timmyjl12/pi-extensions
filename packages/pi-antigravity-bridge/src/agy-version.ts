@@ -13,6 +13,7 @@
 // there: the one known-good build must not be locked out by a CLI number.
 
 import { spawn } from "node:child_process";
+import { terminateProcessTree, trackSpawnedIdentity } from "./process-tree.js";
 
 /** Floor for the stream-json CLI. Matches the protocol grammar our driver
  *  and the event mapping rely on; older agy predates verified fields. */
@@ -89,8 +90,13 @@ export function checkAgyCliVersion(binary: string = "agy"): Promise<AgyVersionCh
 			resolve(check);
 		};
 		let proc: ReturnType<typeof spawn>;
+		const spawnedAtMs = Date.now();
 		try {
-			proc = spawn(binary, ["--version"], { stdio: ["ignore", "pipe", "ignore"], shell: false });
+			proc = trackSpawnedIdentity(
+				spawn(binary, ["--version"], { stdio: ["ignore", "pipe", "ignore"], shell: false }),
+				binary,
+				spawnedAtMs,
+			);
 		} catch {
 			finish({ status: "unavailable", raw: "" });
 			return;
@@ -103,11 +109,7 @@ export function checkAgyCliVersion(binary: string = "agy"): Promise<AgyVersionCh
 		// invalid — close enough in effect to unavailable for a warn-only gate.
 		proc.on("close", () => finish(agyVersionVerdict(out)));
 		const watchdog = setTimeout(() => {
-			try {
-				proc.kill("SIGKILL");
-			} catch {
-				/* already gone */
-			}
+			void terminateProcessTree(proc, { signal: "SIGKILL" });
 			finish({ status: "unavailable", raw: out });
 		}, VERSION_TIMEOUT_MS);
 	});

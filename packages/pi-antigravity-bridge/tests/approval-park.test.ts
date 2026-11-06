@@ -7,7 +7,13 @@
 import { test, vi, beforeEach, afterEach } from "vitest";
 import assert from "node:assert/strict";
 import type { McpServerHandle, McpBridgeDeps } from "../src/mcp-server.js";
-import { APPROVAL_PARK_TIMEOUT_MS, startMcpServer, TOKEN_HEADER } from "../src/mcp-server.js";
+import {
+	APPROVAL_PARK_TIMEOUT_MS,
+	APPROVAL_SETTLED_TTL_MS,
+	expiredSettledApprovalTickets,
+	startMcpServer,
+	TOKEN_HEADER,
+} from "../src/mcp-server.js";
 import {
 	APPROVAL_PARK_MS,
 	ToolRoundTrips,
@@ -46,6 +52,18 @@ function approvalUrl(port: number, path: string): string {
 }
 
 // --- endpoints ------------------------------------------------------------------
+
+test("approval: settled TTL expires only old terminal entries", () => {
+	const now = 2_000_000;
+	assert.equal(APPROVAL_SETTLED_TTL_MS, 600_000);
+	const entries = [
+		["pending-old", {}],
+		["recent", { terminal: { allow: true }, settledAt: now - APPROVAL_SETTLED_TTL_MS + 1 }],
+		["expired", { terminal: { allow: false, reason: "deny" }, settledAt: now - APPROVAL_SETTLED_TTL_MS }],
+		["timestamp-less", { terminal: { allow: true } }],
+	] as const;
+	assert.deepEqual(expiredSettledApprovalTickets(entries, now), ["expired", "timestamp-less"]);
+});
 
 test("approval: POST parks and early-acks a ticket; onApproval gets the payload", async () => {
 	const seen: Array<{ ticket: string; name: string }> = [];
@@ -93,6 +111,40 @@ test("approval: resolve allow -> terminal decision on the next poll, then gone",
 		headers: { [TOKEN_HEADER]: handle.token },
 	});
 	assert.equal(again.status, 404);
+});
+
+test("approval: a new park sweeps an undelivered settled ticket after the TTL", async () => {
+	const now = 2_000_000;
+	const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+	try {
+		const r = await startMcpServer(deps({ onApproval: () => {} }));
+		handle = r.handle!;
+		const first = await fetch(approvalUrl(handle.port, "/approval"), {
+			method: "POST",
+			headers: { "content-type": "application/json", [TOKEN_HEADER]: handle.token },
+			body: hookPayload(),
+		});
+		const { ticket } = (await first.json()) as { ticket: string };
+		handle.approvals.resolve(ticket, { allow: true });
+
+		clock.mockReturnValue(now + APPROVAL_SETTLED_TTL_MS);
+		const second = await fetch(approvalUrl(handle.port, "/approval"), {
+			method: "POST",
+			headers: { "content-type": "application/json", [TOKEN_HEADER]: handle.token },
+			body: hookPayload(),
+		});
+		const { ticket: pendingTicket } = (await second.json()) as { ticket: string };
+		const expiredPoll = await fetch(approvalUrl(handle.port, `/approval/${ticket}`), {
+			headers: { [TOKEN_HEADER]: handle.token },
+		});
+		assert.equal(expiredPoll.status, 404);
+		const pendingPoll = await fetch(approvalUrl(handle.port, `/approval/${pendingTicket}`), {
+			headers: { [TOKEN_HEADER]: handle.token },
+		});
+		assert.deepEqual(await pendingPoll.json(), { status: "pending" });
+	} finally {
+		clock.mockRestore();
+	}
 });
 
 test("approval: resolve deny carries the reason (the model's only feedback)", async () => {

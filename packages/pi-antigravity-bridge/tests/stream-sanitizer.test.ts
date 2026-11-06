@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
 import {
+	MAX_UNMATCHED_SYSTEM_MESSAGE_CHARS,
+	START_MARKER,
 	StreamSanitizer,
 	sanitizeSystemMessage,
+	SystemMessageOverflowError,
 } from "../src/stream-sanitizer.js";
 
 describe("StreamSanitizer", () => {
@@ -85,6 +88,44 @@ describe("StreamSanitizer", () => {
 		];
 		const output = chunks.map((c) => s.push(c)).join("") + s.flush();
 		assert.equal(output, "First line.\n\nSecond line.");
+	});
+
+	it("keeps below-cap fail-open behavior at the exact unmatched-block boundary", () => {
+		const s = new StreamSanitizer();
+		const unmatched = START_MARKER + "x".repeat(MAX_UNMATCHED_SYSTEM_MESSAGE_CHARS - START_MARKER.length);
+		assert.equal(s.push(unmatched), "");
+		assert.equal(s.flush(), unmatched);
+	});
+
+	it("fails closed on a one-character unmatched-block overflow and resets retained state", () => {
+		const s = new StreamSanitizer();
+		const unmatched = START_MARKER + "x".repeat(MAX_UNMATCHED_SYSTEM_MESSAGE_CHARS + 1 - START_MARKER.length);
+		assert.throws(
+			() => s.push(unmatched),
+			(err: unknown) => err instanceof SystemMessageOverflowError && err.unmatchedChars > MAX_UNMATCHED_SYSTEM_MESSAGE_CHARS,
+		);
+		assert.equal(s.flush(), "", "overflow never becomes one giant final delta");
+		assert.equal(s.push("safe"), "safe");
+	});
+
+	it("fails closed when split unmatched chunks cross the cap", () => {
+		const s = new StreamSanitizer();
+		s.push(START_MARKER);
+		let thrown: unknown;
+		try {
+			for (let i = 0; i < 17; i++) s.push("x".repeat(64 * 1024));
+		} catch (err) {
+			thrown = err;
+		}
+		assert.ok(thrown instanceof SystemMessageOverflowError);
+		assert.equal(s.flush(), "");
+	});
+
+	it("still strips a complete block whose end marker arrives in the overflow chunk", () => {
+		const s = new StreamSanitizer();
+		const input = START_MARKER + "x".repeat(MAX_UNMATCHED_SYSTEM_MESSAGE_CHARS + 1) + "</SYSTEM_MESSAGE>answer";
+		assert.equal(s.push(input), "answer");
+		assert.equal(s.flush(), "");
 	});
 });
 

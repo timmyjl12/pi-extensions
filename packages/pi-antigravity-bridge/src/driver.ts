@@ -18,12 +18,18 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { parseAgyLine } from "./stream-events.js";
 import { isKnownNoiseLine, MAX_FRAME_BYTES, stripGluedNoise } from "./frame-guard.js";
+import { NdjsonFrameAssembler } from "./ndjson-assembler.js";
 import { bridgeMcpConfigDir, bridgeMcpConfigExists } from "./mcp-server.js";
 import { gateHooksStaged } from "./approval-hook.js";
 import { parkedTurnAnswer } from "./parked-turn.js";
+import { terminateProcessTree, trackSpawnedIdentity } from "./process-tree.js";
 import { defaultCliSettingsPath, ensureQueuedMessagesInFile } from "./queued-messages.js";
 import { redactText } from "./redact.js";
-import { StreamSanitizer, sanitizeSystemMessage } from "./stream-sanitizer.js";
+import {
+	StreamSanitizer,
+	sanitizeSystemMessage,
+	SystemMessageOverflowError,
+} from "./stream-sanitizer.js";
 import type {
 	AgyUsage,
 	DriverActivity,
@@ -189,10 +195,9 @@ export class StreamDriver implements TurnDriver {
 	#active: ActiveTurn | undefined;
 	#queueTail: Promise<void> = Promise.resolve();
 	#stderrTail = "";
-	// Frames can split across pipe chunks; the trailing partial line lives here
-	// until its newline arrives (same scheme as JsonRpcSession.feed). Dropping
-	// it ate large tool frames and could hide the result frame of a turn.
-	#stdoutBuf = "";
+	// Only the trailing partial frame is retained. Completed frames are joined
+	// at most once instead of appending/splitting the entire buffer per chunk.
+	#stdoutFrames = new NdjsonFrameAssembler(MAX_FRAME_BYTES);
 	#lifecycle: string[] = [];
 	/** Optional external lifecycle sink (the extension's daily file log).
 	 *  Fire-and-forget: the ring buffer stays the source for /agy doctor. */
@@ -349,7 +354,7 @@ export class StreamDriver implements TurnDriver {
 			turn.onAbort = () => {
 				if (turn.closed) return;
 				this.#log(`abort:${turn.id}`);
-				this.#killChild();
+				void this.#killChild();
 				this.#settle(turn, {
 					conversationId: turn.conversationId,
 					status: "ERROR",
@@ -435,14 +440,15 @@ export class StreamDriver implements TurnDriver {
 			"--disable-slash-commands",
 		);
 
-		const child = spawn("agy", args, {
+		const spawnedAtMs = Date.now();
+		const child = trackSpawnedIdentity(spawn("agy", args, {
 			cwd: request.cwd,
 			stdio: ["pipe", "pipe", "pipe"],
 			detached: process.platform !== "win32",
 			windowsHide: true,
-		});
+		}), "agy", spawnedAtMs);
 		this.#child = child;
-		this.#stdoutBuf = "";
+		this.#stdoutFrames.reset();
 		this.#stats.spawns += 1;
 		// Pipe write failures surface asynchronously as stream 'error' events;
 		// the sync try/catch around stdin.write cannot see them. Without this
@@ -500,32 +506,15 @@ export class StreamDriver implements TurnDriver {
 	}
 
 	#onStdout(chunk: string): void {
-		// Buffer the trailing partial line: a frame split across pipe chunks is
-		// reassembled when its newline arrives (mirrors JsonRpcSession.feed).
-		this.#stdoutBuf += chunk;
-		if (this.#stdoutBuf.length > MAX_FRAME_BYTES) {
-			// A no-newline flood over the cap means the peer is broken or
-			// hostile: fail the turn and tear the process tree down instead of
-			// growing memory without bound.
-			const detail = `${this.#stdoutBuf.length} bytes buffered with no newline (cap ${MAX_FRAME_BYTES})`;
-			this.#stdoutBuf = "";
+		const current = this.#active;
+		if (current && !current.closed && current.idleTimer) current.idleTimer.refresh();
+		const overflowLength = this.#stdoutFrames.push(chunk, (line) => {
 			const turn = this.#active;
-			this.#log("frame-overflow", { detail });
-			if (turn && !turn.closed) this.#failTurn(turn, `stdout frame overflow: ${detail}`);
-			this.#killChild();
-			return;
-		}
-		const lines = this.#stdoutBuf.split("\n");
-		this.#stdoutBuf = lines.pop() ?? "";
-		const turn = this.#active;
-		if (!turn || turn.closed) return;
-		if (turn.idleTimer) turn.idleTimer.refresh();
-		for (const line of lines) {
-			if (!line.trim()) continue;
+			if (!turn || turn.closed || !line.trim()) return;
 			// Known foreign noise (e.g. the Chromium launcher behind a browser
 			// login) is dropped; a noise FRAGMENT glued onto a real frame is
 			// stripped so the frame still parses.
-			if (isKnownNoiseLine(line)) continue;
+			if (isKnownNoiseLine(line)) return;
 			let parsed = parseAgyLine(line);
 			// Repair applies only to true parse failures (raw is the string
 			// fragment): a valid JSON object agy sent with an unrecognized shape
@@ -535,8 +524,16 @@ export class StreamDriver implements TurnDriver {
 				if (repaired) parsed = parseAgyLine(repaired);
 			}
 			this.#applyParsed(turn, parsed);
-			if (turn.closed) return;
-		}
+		});
+		if (overflowLength === undefined) return;
+
+		// A no-newline flood over the cap means the peer is broken or hostile:
+		// fail the turn and tear the process tree down instead of retaining it.
+		const detail = `${overflowLength} bytes buffered with no newline (cap ${MAX_FRAME_BYTES})`;
+		const turn = this.#active;
+		this.#log("frame-overflow", { detail });
+		if (turn && !turn.closed) this.#failTurn(turn, `stdout frame overflow: ${detail}`);
+		void this.#killChild();
 	}
 
 	#applyParsed(turn: ActiveTurn, parsed: ReturnType<typeof parseAgyLine>): void {
@@ -671,7 +668,16 @@ export class StreamDriver implements TurnDriver {
 		}
 
 		if (rawDelta.length > 0) {
-			const sanitizedDelta = turn.sanitizer.push(rawDelta);
+			let sanitizedDelta: string;
+			try {
+				sanitizedDelta = turn.sanitizer.push(rawDelta);
+			} catch (err) {
+				if (!(err instanceof SystemMessageOverflowError)) throw err;
+				this.#log("system-message-overflow", { unmatchedChars: err.unmatchedChars });
+				void this.#killChild();
+				this.#failTurn(turn, err.message);
+				return;
+			}
 			if (sanitizedDelta.length > 0) {
 				turn.response += sanitizedDelta;
 				emit(turn, { type: "text", delta: sanitizedDelta });
@@ -733,7 +739,7 @@ export class StreamDriver implements TurnDriver {
 	async #turnDeadlineGuard(turn: ActiveTurn, label: "timeout" | "stall", message: string): Promise<void> {
 		if (turn.closed) return;
 		this.#log(`${label}:${turn.id}`);
-		this.#killChild();
+		await this.#killChild();
 		let parked: string | undefined;
 		try {
 			parked = turn.conversationId
@@ -801,38 +807,26 @@ export class StreamDriver implements TurnDriver {
 		if (turn && !turn.closed) {
 			this.#failTurn(turn, `agy driver ${reason === "recycle" ? "recycled" : "shut down"} mid-turn${cause ? ` (${cause})` : ""}`);
 		}
-		this.#killChild();
+		await this.#killChild();
 		this.#state = reason === "shutdown" ? "dead" : "idle";
 	}
 
-	#killChild(): void {
+	#killChild(): Promise<void> {
 		const child = this.#child;
-		if (!child) return;
+		if (!child) return Promise.resolve();
 		this.#child = undefined;
 		this.#generation += 1;
-		this.#stdoutBuf = "";
+		this.#stdoutFrames.reset();
 		try {
 			child.stdout?.removeAllListeners();
 			child.stderr?.removeAllListeners();
 		} catch {
 			/* already gone */
 		}
-		try {
-			if (process.platform !== "win32" && child.pid) {
-				process.kill(-child.pid, "SIGTERM");
-				setTimeout(() => {
-					try {
-						if (child.pid) process.kill(-child.pid, "SIGKILL");
-					} catch {
-						/* already dead */
-					}
-				}, 750);
-			} else {
-				child.kill("SIGTERM");
-			}
-		} catch {
-			/* already dead */
-		}
+		return terminateProcessTree(child, {
+			posixGroup: true,
+			onError: (err) => this.#log("kill-error", { message: err instanceof Error ? err.message : String(err) }),
+		});
 	}
 
 	#log(msg: string, data?: unknown): void {

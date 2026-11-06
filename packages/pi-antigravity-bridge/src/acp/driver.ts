@@ -26,6 +26,7 @@ import type { UsageEstimate } from "../config.js";
 import { AcpConnection, resolveAcpBinary, type AcpMcpServer, type AcpPermissionRequest } from "./connection.js";
 import type { AcpPermissionHandler } from "./connection.js";
 import { mapStopReason, mapUpdate, TextAccumulator, type AcpEditDiff } from "./events.js";
+import { SystemMessageOverflowError } from "../stream-sanitizer.js";
 import { estimateTokens, synthesizeUsage } from "./usage-estimate.js";
 import type {
 	AgyUsage,
@@ -418,7 +419,16 @@ export class AcpDriver implements TurnDriver {
 		if (!mapped) return;
 		switch (mapped.kind) {
 			case "text": {
-				const emit = turn.response.append(mapped.delta);
+				let emit: string | null;
+				try {
+					emit = turn.response.append(mapped.delta);
+				} catch (err) {
+					if (!(err instanceof SystemMessageOverflowError)) throw err;
+					this.#log("system-message-overflow", { unmatchedChars: err.unmatchedChars });
+					this.#conn?.kill();
+					this.#failTurn(turn, err.message);
+					return;
+				}
 				if (emit) {
 					turn.textDeltas += 1;
 					turn.textTokens += estimateTokens(emit);
@@ -545,12 +555,12 @@ export class AcpDriver implements TurnDriver {
 				this.#state = "ready";
 				return conn;
 			})
-			.catch((err) => {
+			.catch(async (err) => {
 				// A server that spawned but failed the handshake (init timeout,
 				// auth hang) must not leak: it is detached, so it outlives pi.
 				this.#state = "dead";
 				this.#conn = undefined;
-				conn.kill();
+				await conn.dispose();
 				this.#log("start-failed", { message: describe(err) });
 				throw err;
 			});
@@ -837,7 +847,7 @@ export class AcpDriver implements TurnDriver {
 			});
 		}
 		this.#conn?.abortAll(`driver ${reason}`);
-		this.#conn?.kill();
+		if (this.#conn) await this.#conn.dispose();
 		this.#conn = undefined;
 		this.#state = "dead";
 	}

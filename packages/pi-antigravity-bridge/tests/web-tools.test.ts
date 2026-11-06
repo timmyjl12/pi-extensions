@@ -70,6 +70,14 @@ async function runFixture(mode: string, opts: Partial<WebRunOptions> = {}): Prom
 	}
 }
 
+function runWrappedFixture(mode: string, opts: Partial<WebRunOptions> = {}): Promise<WebRunResult> {
+	return runFixture(mode, {
+		bin: process.platform === "win32" ? process.execPath : FIXTURE,
+		binArgs: process.platform === "win32" ? [FIXTURE] : undefined,
+		...opts,
+	});
+}
+
 function listBridgeDirs(): string[] {
 	try {
 		return readdirSync(root).filter((e) => e.startsWith(WEB_AGENT_PREFIX));
@@ -148,6 +156,33 @@ describe("runWebAgent gate", () => {
 	test("a run past the deadline is killed and fails", async () => {
 		const run = await runFixture("slow", { timeoutMs: 150 });
 		expect(run.ok).toBe(false);
+	});
+
+	test("split UTF-8 code points are preserved across NDJSON chunks", async () => {
+		const run = await runWrappedFixture("split-unicode");
+		expect(run.ok).toBe(true);
+		if (run.ok) expect(run.response).toBe("FAKE 😀 漢字");
+	});
+
+	test("a child flooding after the output cap fails without retaining its partial frame", async () => {
+		const run = await runWrappedFixture("overflow", { timeoutMs: 2_000 });
+		expect(run.ok).toBe(false);
+		if (!run.ok) expect(run.error).toContain("exceeded the 2 MiB limit");
+	});
+
+	test("a disallowed-tool failure wins even when the child keeps flooding stdout", async () => {
+		const run = await runWrappedFixture("unexpected-flood", { timeoutMs: 2_000 });
+		expect(run.ok).toBe(false);
+		if (!run.ok) expect(run.error).toContain("disallowed tool: run_command");
+	});
+
+	test("an unterminated result tail is never emitted as an answer", async () => {
+		const run = await runWrappedFixture("partial-result");
+		expect(run.ok).toBe(false);
+		if (!run.ok) {
+			expect(run.error).toContain("produced no answer");
+			expect(run.error).not.toContain("MUST NOT EMIT");
+		}
 	});
 });
 

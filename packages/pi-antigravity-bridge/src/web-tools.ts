@@ -21,7 +21,9 @@ import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync }
 import os from "node:os";
 import path from "node:path";
 import { Type } from "typebox";
+import { NdjsonFrameAssembler } from "./ndjson-assembler.js";
 import { redactText } from "./redact.js";
+import { terminateProcessTree, trackSpawnedIdentity } from "./process-tree.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export const WEB_AGENT_PREFIX = "pi-bridge-web-";
@@ -105,6 +107,8 @@ export interface WebRunOptions {
 	gatedTool: "search_web" | "read_url_content";
 	/** Server binary; defaults to AGY_BIN or PATH, matching ask-tool. */
 	bin?: string;
+	/** Optional leading executable arguments (used to run script fixtures via node). */
+	binArgs?: string[];
 	/** Agents root override (tests); defaults to the user-global agy dir. */
 	agentsRoot?: string;
 	/** Working directory handed to agy. */
@@ -140,6 +144,7 @@ export async function runWebAgent(opts: WebRunOptions): Promise<WebRunResult> {
 
 	const bin = opts.bin ?? process.env.AGY_BIN ?? "agy";
 	const args = [
+		...(opts.binArgs ?? []),
 		"--agent", agentName,
 		"--print", opts.prompt,
 		"--mode", "plan",
@@ -148,15 +153,32 @@ export async function runWebAgent(opts: WebRunOptions): Promise<WebRunResult> {
 	];
 	opts.log?.("web-run-start", { agent: agentName, gatedTool: opts.gatedTool });
 
-	const child = spawn(bin, args, { cwd: opts.cwd ?? process.cwd(), stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
-	const stop = () => {
-		if (!child.killed) child.kill();
+	const spawnedAtMs = Date.now();
+	const child = trackSpawnedIdentity(spawn(bin, args, {
+		cwd: opts.cwd ?? process.cwd(),
+		stdio: ["ignore", "pipe", "pipe"],
+		windowsHide: true,
+	}), bin, spawnedAtMs);
+	let termination: Promise<void> | undefined;
+	const stop = (): Promise<void> => {
+		termination ??= terminateProcessTree(child, {
+			onError: (err) => opts.log?.(
+				"web-kill-failed",
+				{ message: err instanceof Error ? err.message : String(err) },
+				"warn",
+			),
+		});
+		return termination;
 	};
-	const onAbort = () => stop();
+	const onAbort = () => {
+		void stop();
+	};
 	opts.signal?.addEventListener("abort", onAbort, { once: true });
-	const timer = setTimeout(stop, opts.timeoutMs ?? DEADLINE_MS);
+	const timer = setTimeout(() => {
+		void stop();
+	}, opts.timeoutMs ?? DEADLINE_MS);
 
-	let buffer = "";
+	const frames = new NdjsonFrameAssembler(MAX_OUTPUT_BYTES);
 	let bytes = 0;
 	let stderrTail = "";
 	let failed = "";
@@ -164,23 +186,30 @@ export async function runWebAgent(opts: WebRunOptions): Promise<WebRunResult> {
 	let response = "";
 
 	try {
-		child.stdout?.on("data", (chunk: Buffer) => {
-			bytes += chunk.length;
-			if (bytes > MAX_OUTPUT_BYTES && !failed) {
+		child.stdout?.setEncoding("utf8");
+		child.stdout?.on("data", (chunk: string) => {
+			// A terminal failure is also a hard stop for retention: a
+			// noncompliant child can keep writing, but cannot grow our buffer.
+			if (failed) return;
+			bytes += Buffer.byteLength(chunk, "utf8");
+			if (bytes > MAX_OUTPUT_BYTES) {
 				failed = "Antigravity web run output exceeded the 2 MiB limit";
-				stop();
+				frames.reset();
+				void stop();
 				return;
 			}
-			buffer += chunk.toString("utf8");
-			let newline = buffer.indexOf("\n");
-			while (newline !== -1 && !failed) {
-				handleFrame(buffer.slice(0, newline));
-				buffer = buffer.slice(newline + 1);
-				newline = buffer.indexOf("\n");
+			const overflow = frames.push(chunk, handleFrame);
+			if (overflow !== undefined) {
+				failed = "Antigravity web run output exceeded the 2 MiB limit";
+				frames.reset();
+				void stop();
+				return;
 			}
+			if (failed) frames.reset();
 		});
-		child.stderr?.on("data", (chunk: Buffer) => {
-			stderrTail = (stderrTail + chunk.toString("utf8")).slice(-1000);
+		child.stderr?.setEncoding("utf8");
+		child.stderr?.on("data", (chunk: string) => {
+			stderrTail = (stderrTail + chunk).slice(-1000);
 		});
 		const code = await new Promise<number | null>((resolve, reject) => {
 			child.once("error", reject);
@@ -203,7 +232,8 @@ export async function runWebAgent(opts: WebRunOptions): Promise<WebRunResult> {
 	} finally {
 		clearTimeout(timer);
 		opts.signal?.removeEventListener("abort", onAbort);
-		stop();
+		frames.reset(); // Deliberately no flush: a partial result frame is not an answer.
+		await stop();
 		rmSync(agentDir, { recursive: true, force: true });
 	}
 
@@ -225,7 +255,7 @@ export async function runWebAgent(opts: WebRunOptions): Promise<WebRunResult> {
 				if (step.state === "DONE" || step.state === "OK") allowedToolUsed = true;
 			} else if (step.state === "ACTIVE" || step.state === "DONE") {
 				failed = `Antigravity web agent used a disallowed tool: ${step.tool_name}`;
-				stop();
+				void stop();
 			}
 			return;
 		}
@@ -233,7 +263,7 @@ export async function runWebAgent(opts: WebRunOptions): Promise<WebRunResult> {
 			const result = record.result as Record<string, unknown>;
 			if (result.status !== "SUCCESS" && result.status !== "OK") {
 				failed = `Antigravity web run reported status ${String(result.status)}`;
-				stop();
+				void stop();
 				return;
 			}
 			if (typeof result.response === "string") response = result.response;

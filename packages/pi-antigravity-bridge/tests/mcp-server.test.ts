@@ -5,7 +5,14 @@ import { test, beforeEach, afterEach } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import type { McpServerHandle, McpBridgeDeps } from "../src/mcp-server.js";
-import { bridgeMcpConfigExists, startMcpServer, TOKEN_HEADER } from "../src/mcp-server.js";
+import {
+	bridgeMcpConfigExists,
+	closeMcpRequestResources,
+	createMcpCallHandler,
+	registerExitCleanup,
+	startMcpServer,
+	TOKEN_HEADER,
+} from "../src/mcp-server.js";
 
 let handle: McpServerHandle | null = null;
 
@@ -69,7 +76,8 @@ test("mcp-server: onToolCall rejection surfaces as an isError result upstream", 
 });
 
 test("mcp-server: 403s requests without or with a wrong x-bridge-token", async () => {
-	const r = await startMcpServer(fakeDeps());
+	const events: string[] = [];
+	const r = await startMcpServer(fakeDeps(), { log: (msg) => events.push(msg) });
 	handle = r.handle!;
 	assert.equal(r.ok, true);
 	const url = `http://127.0.0.1:${handle.port}/mcp`;
@@ -103,6 +111,114 @@ test("mcp-server: 403s requests without or with a wrong x-bridge-token", async (
 	assert.ok(dataLine, "expected an SSE data line");
 	const payload = JSON.parse(dataLine.slice(5).trim()) as { result?: { tools?: unknown[] } };
 	assert.ok(Array.isArray(payload.result?.tools));
+
+	// A protocol-level error still tears down its fresh stateless resources.
+	const methodError = await fetch(url, {
+		method: "POST",
+		headers: {
+			"content-type": "application/json",
+			accept: "application/json, text/event-stream",
+			[TOKEN_HEADER]: handle.token,
+		},
+		body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "not/a-method", params: {} }),
+	});
+	assert.equal(methodError.status, 200);
+	await methodError.text();
+	assert.equal(events.filter((event) => event === "request-resources-closed").length, 2);
+});
+
+test("mcp-server: per-request cleanup still closes the transport after a server close error", async () => {
+	const closed: string[] = [];
+	const events: string[] = [];
+	await closeMcpRequestResources(
+		{
+			close: async () => {
+				closed.push("server");
+				throw new Error("injected close failure");
+			},
+		},
+		{
+			close: async () => {
+				closed.push("transport");
+			},
+		},
+		(msg) => events.push(msg),
+	);
+	assert.deepEqual(closed, ["server", "transport"]);
+	assert.deepEqual(events, ["request-server-close-error", "request-resources-closed"]);
+});
+
+test("mcp-server: pre-aborted tool calls never register a provider round trip", async () => {
+	let calls = 0;
+	const events: string[] = [];
+	const handler = createMcpCallHandler(
+		fakeDeps({
+			onToolCall: async () => {
+				calls += 1;
+				return { content: [], isError: false };
+			},
+		}),
+		(msg) => events.push(msg),
+	);
+	const controller = new AbortController();
+	controller.abort();
+	const result = await handler(
+		{ params: { name: "mem_search", arguments: {} } },
+		controller.signal,
+	);
+	assert.equal(calls, 0);
+	assert.equal(result.isError, true);
+	assert.match(result.content[0]?.text ?? "", /aborted before tool registration/);
+	assert.deepEqual(events, ["call-tool-aborted"]);
+});
+
+test("mcp-server: same-key exit cleanup replaces handlers without running stale cleanup", () => {
+	const sig = "SIGUSR2";
+	const exitBaseline = process.listenerCount("exit");
+	const signalBaseline = process.listenerCount(sig);
+	let staleCleanups = 0;
+	let disposeFirst = (): void => {};
+	let disposeSecond = (): void => {};
+	try {
+		disposeFirst = registerExitCleanup(() => {
+			staleCleanups += 1;
+		}, { signals: [sig] });
+		assert.equal(process.listenerCount("exit"), exitBaseline + 1);
+		assert.equal(process.listenerCount(sig), signalBaseline + 1);
+
+		disposeSecond = registerExitCleanup(() => undefined, { signals: [sig] });
+		assert.equal(process.listenerCount("exit"), exitBaseline + 1, "exit handler does not stack");
+		assert.equal(process.listenerCount(sig), signalBaseline + 1, "owned handler is not mistaken for a host");
+		assert.equal(staleCleanups, 0, "replacement never deletes the new config through stale cleanup");
+
+		disposeFirst();
+		assert.equal(process.listenerCount(sig), signalBaseline + 1, "stale disposer cannot remove replacement");
+		disposeSecond();
+		assert.equal(process.listenerCount("exit"), exitBaseline);
+		assert.equal(process.listenerCount(sig), signalBaseline);
+		disposeSecond(); // idempotent
+	} finally {
+		disposeFirst();
+		disposeSecond();
+	}
+});
+
+test("mcp-server: a real host signal listener suppresses owned signal installation", () => {
+	const sig = "SIGUSR2";
+	const host = (): void => undefined;
+	process.once(sig, host);
+	const exitBaseline = process.listenerCount("exit");
+	const signalBaseline = process.listenerCount(sig);
+	const dispose = registerExitCleanup(() => undefined, { signals: [sig] });
+	try {
+		assert.equal(process.listenerCount(sig), signalBaseline, "only the host listener remains");
+		assert.equal(process.listenerCount("exit"), exitBaseline + 1, "exit cleanup still installs");
+	} finally {
+		dispose();
+		process.removeListener(sig, host);
+	}
+	assert.equal(process.listenerCount("exit"), exitBaseline);
+	assert.equal(process.listenerCount(sig), signalBaseline - 1);
 });
 
 test("mcp-server: no stale config before start", () => {

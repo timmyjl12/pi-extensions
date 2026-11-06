@@ -60,6 +60,32 @@ export interface ApprovalPayload {
  *  agy's model gets, see V2). */
 export type ApprovalDecision = { allow: true } | { allow: false; reason: string };
 
+export const APPROVAL_SETTLED_TTL_MS = 10 * 60 * 1000;
+
+export interface SettledApprovalParkShape {
+	terminal?: ApprovalDecision;
+	settledAt?: number;
+}
+
+/** Deterministic settled-park TTL selection. Pending and recent entries stay;
+ *  legacy timestamp-less terminal entries expire defensively. Delivery still
+ *  deletes immediately in the route. Pure and exported for retention tests. */
+export function expiredSettledApprovalTickets(
+	entries: Iterable<readonly [string, SettledApprovalParkShape]>,
+	nowMs: number,
+): string[] {
+	const expired: string[] = [];
+	for (const [ticket, park] of entries) {
+		if (
+			park.terminal !== undefined &&
+			(park.settledAt === undefined || nowMs - park.settledAt >= APPROVAL_SETTLED_TTL_MS)
+		) {
+			expired.push(ticket);
+		}
+	}
+	return expired;
+}
+
 /** Provider-facing park controls: ticket verification for the shadow tools'
  *  marker calls, and completion when pi's tool result maps to a decision. */
 export interface ApprovalParkApi {
@@ -90,6 +116,31 @@ export interface McpStartResult {
 	port?: number;
 	handle?: McpServerHandle;
 	reason?: string;
+}
+
+interface McpCloseable {
+	close(): Promise<void>;
+}
+
+/** Close both per-request SDK resources. Server.close() delegates to the
+ *  connected transport in the installed SDK; the explicit transport close is
+ *  an idempotent backstop for partial connect/close failures. */
+export async function closeMcpRequestResources(
+	server: McpCloseable | undefined,
+	transport: McpCloseable | undefined,
+	log: (msg: string, data?: unknown) => void,
+): Promise<void> {
+	try {
+		await server?.close();
+	} catch (err) {
+		log("request-server-close-error", { message: err instanceof Error ? err.message : String(err) });
+	}
+	try {
+		await transport?.close();
+	} catch (err) {
+		log("request-transport-close-error", { message: err instanceof Error ? err.message : String(err) });
+	}
+	if (server || transport) log("request-resources-closed");
 }
 
 /** Provider-owned bridge surface. The provider builds the tool catalog
@@ -227,57 +278,135 @@ function removeBridgeMcpConfig(): void {
 export interface ExitCleanupOptions {
 	/** Signals to catch for abrupt-termination cleanup. Default SIGINT/SIGTERM. */
 	signals?: NodeJS.Signals[];
-	/** Override the host-ownership check (tests). Default: process.listenerCount(sig) > 0. */
+	/** Override the host-ownership check (tests). Default excludes registry-owned
+	 *  handlers and detects only real host listeners. */
 	hasHostListener?: (sig: NodeJS.Signals) => boolean;
 }
 
+interface OwnedExitHandlers {
+	onExit: () => void;
+	signalHandlers: Map<NodeJS.Signals, () => void>;
+}
+
+type ExitCleanupRegistry = Map<string, OwnedExitHandlers>;
+
+// Symbol.for is intentional: extension reloads and duplicate module instances
+// must see one process-global registry, not stack independent process handlers.
+const EXIT_CLEANUP_REGISTRY = Symbol.for("pi-antigravity-bridge.exit-cleanup-registry.v1");
+
+function exitCleanupRegistry(): ExitCleanupRegistry {
+	const holder = globalThis as unknown as Record<symbol, unknown>;
+	const existing = holder[EXIT_CLEANUP_REGISTRY] as ExitCleanupRegistry | undefined;
+	if (existing) return existing;
+	const created: ExitCleanupRegistry = new Map();
+	holder[EXIT_CLEANUP_REGISTRY] = created;
+	return created;
+}
+
+function detachOwnedExitHandlers(record: OwnedExitHandlers): void {
+	process.removeListener("exit", record.onExit);
+	for (const [sig, handler] of record.signalHandlers) process.removeListener(sig, handler);
+}
+
+function isRegistryOwnedListener(listener: unknown): boolean {
+	for (const record of exitCleanupRegistry().values()) {
+		for (const handler of record.signalHandlers.values()) {
+			if (handler === listener) return true;
+		}
+	}
+	return false;
+}
+
 /** Register best-effort cleanup of this process's bridge config dir on process
- *  exit, returning a disposer that removes the handlers (call from close()).
- *
- *  - 'exit' is always registered: synchronous, safe, catches process.exit() and
- *    event-loop drain. It does NOT fire on signal death.
- *  - For each signal in `signals` (default SIGINT/SIGTERM) we install a handler
- *    ONLY when the host process has no existing listener for it, so this
- *    extension never interferes with the host's own signal handling (e.g. a TUI
- *    cancel/quit flow). When we do install, we run cleanup then re-raise the
- *    signal so Node's default termination and exit code are preserved. Any
- *    abrupt termination that still bypasses these is swept on the next launch
- *    (sweepStaleBridgeDirs).
- *
- *  `hasHostListener` is injectable so tests can exercise both branches without
- *  depending on which signals the test runtime happens to listen on. */
+ *  exit. Same-key re-registration detaches stale handlers WITHOUT running
+ *  their cleanup, so an old module instance cannot delete the new config.
+ *  Real host signal listeners always win; registry-owned handlers do not count
+ *  as host listeners. Disposal is idempotent and cannot remove a replacement. */
 export function registerExitCleanup(
 	cleanup: () => void,
 	opts: ExitCleanupOptions = {},
 ): () => void {
-	const signals = opts.signals ?? ["SIGINT", "SIGTERM"];
-	const hasHostListener = opts.hasHostListener ?? ((sig) => process.listenerCount(sig) > 0);
-	const onExit = (): void => cleanup();
-	process.once("exit", onExit);
+	const registry = exitCleanupRegistry();
+	const key = bridgeMcpConfigDir();
+	const stale = registry.get(key);
+	if (stale) {
+		detachOwnedExitHandlers(stale);
+		registry.delete(key);
+	}
 
-	const installed: Array<{ sig: NodeJS.Signals; handler: () => void }> = [];
+	const signals = opts.signals ?? ["SIGINT", "SIGTERM"];
+	const hasHostListener = opts.hasHostListener ?? ((sig: NodeJS.Signals) =>
+		process.listeners(sig).some((listener) => !isRegistryOwnedListener(listener)));
+	const record: OwnedExitHandlers = {
+		onExit: (): void => cleanup(),
+		signalHandlers: new Map(),
+	};
+	registry.set(key, record);
+	process.once("exit", record.onExit);
+
 	for (const sig of signals) {
-		// Host owns this signal: defer. The exit handler plus next-launch sweep
-		// cover the abrupt-death gap without racing the host's handler.
+		// The exit handler plus next-launch sweep cover host-owned signals.
 		if (hasHostListener(sig)) continue;
 		const handler = (): void => {
 			cleanup();
 			process.removeListener(sig, handler);
-			// Re-raise so default termination runs with the right exit code, BUT
-			// only if no host listener has appeared since install (ours is removed
-			// now, so listenerCount reflects the host). If the host registered
-			// later it already received this delivery alongside us; re-raising
-			// would double-deliver (e.g. triggering a "Ctrl-C twice to quit" path
-			// on the first keypress). When nobody owns it, re-raise safely.
-			if (process.listenerCount(sig) === 0) process.kill(process.pid, sig);
+			record.signalHandlers.delete(sig);
+			// Re-raise only when no REAL host listener appeared after install.
+			// Other registry-owned handlers must not suppress default termination.
+			if (!hasHostListener(sig)) process.kill(process.pid, sig);
 		};
+		record.signalHandlers.set(sig, handler);
 		process.once(sig, handler);
-		installed.push({ sig, handler });
 	}
 
+	let disposed = false;
 	return (): void => {
-		process.removeListener("exit", onExit);
-		for (const { sig, handler } of installed) process.removeListener(sig, handler);
+		if (disposed) return;
+		disposed = true;
+		detachOwnedExitHandlers(record);
+		if (registry.get(key) === record) registry.delete(key);
+	};
+}
+
+export function createMcpCallHandler(
+	deps: McpBridgeDeps,
+	log: (msg: string, data?: unknown) => void,
+) {
+	return async (
+		request: { params: { name: string; arguments?: unknown; _meta?: { progressToken?: unknown } } },
+		signal?: AbortSignal,
+	) => {
+		const { name, arguments: args } = request.params;
+		// Do not create a provider park/timer for work already cancelled.
+		if (signal?.aborted) {
+			log("call-tool-aborted", { name });
+			return {
+				content: [{ type: "text" as const, text: "Error: bridge call aborted before tool registration" }],
+				isError: true,
+			};
+		}
+		const meta = request.params._meta;
+		if (meta && meta.progressToken !== undefined) {
+			log("progress-token", { name, token: String(meta.progressToken) });
+		}
+		const callId = crypto.randomUUID();
+		log("call-tool", { name, callId });
+		try {
+			const r = await deps.onToolCall(
+				callId,
+				name,
+				(args && typeof args === "object" ? args : {}) as Record<string, unknown>,
+				signal ?? new AbortController().signal,
+			);
+			const content =
+				r.content && r.content.length > 0 ? r.content : [{ type: "text" as const, text: JSON.stringify(r) }];
+			log("call-tool-ok", { name, callId });
+			return { content, isError: r.isError ?? false };
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : String(e);
+			log("call-tool-fail", { name, callId, msg });
+			return { content: [{ type: "text" as const, text: `Error: ${msg}` }], isError: true };
+		}
 	};
 }
 
@@ -299,35 +428,7 @@ export async function startMcpServer(
 		return { tools };
 	};
 
-	const callHandler = async (request: { params: { name: string; arguments?: unknown } }, signal?: AbortSignal) => {
-		const { name, arguments: args } = request.params;
-		// Progress probe: agy's MCP client killed long bridge calls at exactly
-		// ~180s (see ACP-PROTOCOL-REFERENCE). If its requests ever carry a
-		// progressToken, MCP progress notifications become a testable zero-UX
-		// fix for that deadline; log presence to find out.
-		const meta = (request.params as { _meta?: { progressToken?: unknown } })._meta;
-		if (meta && meta.progressToken !== undefined) {
-			log("progress-token", { name, token: String(meta.progressToken) });
-		}
-		const callId = crypto.randomUUID();
-		log("call-tool", { name, callId });
-		try {
-			const r = await deps.onToolCall(
-				callId,
-				name,
-				(args && typeof args === "object" ? args : {}) as Record<string, unknown>,
-				signal ?? new AbortController().signal,
-			);
-			const content =
-				r.content && r.content.length > 0 ? r.content : [{ type: "text", text: JSON.stringify(r) }];
-			log("call-tool-ok", { name, callId });
-			return { content, isError: r.isError ?? false };
-		} catch (e) {
-			const msg = e instanceof Error ? e.message : String(e);
-			log("call-tool-fail", { name, callId, msg });
-			return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
-		}
-	};
+	const callHandler = createMcpCallHandler(deps, log);
 
 	const makeServer = (signal: AbortSignal) => {
 		const s = new Server(
@@ -351,13 +452,18 @@ export async function startMcpServer(
 	// answer; an unknown/expired ticket 404s and the hook fails closed.
 	const parks = new Map<
 		string,
-		{ name: string; since: number; timer: NodeJS.Timeout; terminal?: ApprovalDecision }
+		{ name: string; since: number; timer: NodeJS.Timeout; terminal?: ApprovalDecision; settledAt?: number }
 	>();
+	const sweepParks = (nowMs = Date.now()): void => {
+		for (const ticket of expiredSettledApprovalTickets(parks.entries(), nowMs)) parks.delete(ticket);
+	};
 	const settlePark = (ticket: string, decision: ApprovalDecision): boolean => {
 		const p = parks.get(ticket);
 		if (!p || p.terminal) return false;
 		p.terminal = decision;
+		p.settledAt = Date.now();
 		clearTimeout(p.timer);
+		sweepParks(p.settledAt);
 		return true;
 	};
 	const approvalsApi: ApprovalParkApi = {
@@ -432,6 +538,7 @@ export async function startMcpServer(
 				denyDirect(res, "approval gate is not wired; denying");
 				return;
 			}
+			sweepParks();
 			const ticket = crypto.randomUUID();
 			const timer = setTimeout(() => {
 				// Fail closed FIRST: the staged hook timeout is longer than this
@@ -549,16 +656,20 @@ export async function startMcpServer(
 				res.on("close", () => {
 					if (!res.writableEnded) ac.abort();
 				});
+				let transport: StreamableHTTPServerTransport | undefined;
+				let server: Server | undefined;
 				try {
-					// Stateless: a fresh transport+server per request.
-					const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+					// Stateless: a fresh transport+server per request, both closed below.
+					transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
 					transport.onerror = (e: Error) => log("transport-error", e.message);
-					const server = makeServer(ac.signal);
+					server = makeServer(ac.signal);
 					await server.connect(transport);
 					await transport.handleRequest(req, res, parsed as object);
 				} catch (e) {
 					log("handleRequest-error", e instanceof Error ? e.message : String(e));
 					if (!res.headersSent) res.writeHead(500).end();
+				} finally {
+					await closeMcpRequestResources(server, transport, log);
 				}
 			} catch (e) {
 				// Catch-all (e.g. errors during body read/clamp) so pi never crashes.

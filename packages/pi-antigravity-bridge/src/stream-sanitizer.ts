@@ -15,6 +15,27 @@
 export const START_MARKER = "The following is a <SYSTEM_MESSAGE>";
 export const END_MARKER = "</SYSTEM_MESSAGE>";
 
+/** Maximum UTF-16 code units retained for an unmatched system-message block.
+ *
+ * Below the cap, an unterminated block fails open on flush exactly as before.
+ * Past the cap the sanitizer resets and throws SystemMessageOverflowError;
+ * both turn engines catch it, fail the active turn, and tear down the transport.
+ * Thus a malformed block can neither grow memory without bound nor be released
+ * as one giant final delta. A block whose END_MARKER arrives in the same chunk
+ * is still stripped normally, regardless of its size.
+ */
+export const MAX_UNMATCHED_SYSTEM_MESSAGE_CHARS = 1024 * 1024;
+
+export class SystemMessageOverflowError extends Error {
+	constructor(readonly unmatchedChars: number) {
+		super(
+			`unterminated SYSTEM_MESSAGE exceeded ${MAX_UNMATCHED_SYSTEM_MESSAGE_CHARS} characters ` +
+				`(buffered ${unmatchedChars}); failing the turn`,
+		);
+		this.name = "SystemMessageOverflowError";
+	}
+}
+
 export const SYSTEM_MESSAGE_RE =
 	/(?:\r?\n)?The following is a <SYSTEM_MESSAGE>[\s\S]*?<\/SYSTEM_MESSAGE>(?:\r?\n)?/g;
 
@@ -119,6 +140,16 @@ export class StreamSanitizer {
 					this.#suppressing = false;
 					this.#suppressedAcc = "";
 					continue;
+				}
+
+				// Bound only an UNMATCHED block. Complete blocks take the normal
+				// stripping path above; below-cap unterminated blocks still fail
+				// open on flush. Reset before throwing so the error path retains
+				// neither a large suppressed accumulator nor a large flush delta.
+				const unmatchedChars = this.#suppressedAcc.length + this.#buffer.length;
+				if (unmatchedChars > MAX_UNMATCHED_SYSTEM_MESSAGE_CHARS) {
+					this.reset();
+					throw new SystemMessageOverflowError(unmatchedChars);
 				}
 
 				// END_MARKER not yet encountered. Check if tail matches prefix of END_MARKER.

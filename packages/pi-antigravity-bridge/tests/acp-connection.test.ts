@@ -4,11 +4,15 @@
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { once } from "node:events";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { test, describe } from "vitest";
 import { AcpConnection, setAuthInvalidatedHook, translateError } from "../src/acp/connection.js";
 import { JsonRpcResponseError } from "../src/acp/jsonrpc.js";
+
+const FAKE_SERVER = fileURLToPath(new URL("./helpers/fake-acp-server.mjs", import.meta.url));
 
 test("acp connection: stderr tail and exit info are redacted", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-conn-"));
@@ -66,11 +70,59 @@ test("acp connection: a token split across stderr chunks is still redacted", asy
 	fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test("acp connection: dispose is memoized, bounded, and destroys owned stdio", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-conn-"));
+	let childRef: import("node:child_process").ChildProcess | undefined;
+	let childClosed: Promise<unknown> | undefined;
+	let terminations = 0;
+	let observedSignal: NodeJS.Signals | undefined;
+	const conn = new AcpConnection({
+		cwd: dir,
+		bin: process.execPath,
+		binArgs: [FAKE_SERVER],
+		disposeTimeoutMs: 40,
+		terminateProcess: (child, signal) => {
+			childRef = child;
+			childClosed = once(child, "close");
+			observedSignal = signal;
+			terminations += 1;
+			return new Promise<void>(() => undefined);
+		},
+		log: () => {},
+		onUpdate: () => {},
+		onExit: () => {},
+	});
+	try {
+		await conn.start();
+		const started = Date.now();
+		const first = conn.dispose();
+		const second = conn.dispose();
+		conn.kill();
+		assert.equal(first, second, "all disposal paths share one promise");
+		await first;
+		assert.ok(Date.now() - started < 500, "injected stuck termination is bounded");
+		assert.equal(terminations, 1);
+		assert.equal(observedSignal, "SIGTERM");
+		assert.ok(childRef);
+		assert.equal(childRef.stdin?.destroyed, true);
+		assert.equal(childRef.stdout?.destroyed, true);
+		assert.equal(childRef.stderr?.destroyed, true);
+	} finally {
+		await conn.dispose();
+		if (childRef && childRef.exitCode === null && childRef.signalCode === null) childRef.kill("SIGKILL");
+		await childClosed;
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 test("acp connection: a stdout frame flood kills the connection instead of growing memory", async () => {
 	// 34MB with no newline breaches the 32MB frame cap: start() must reject
 	// with a typed reason and the exit path must fire, not buffer forever.
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-conn-"));
 	const exits: Array<{ stderrTail: string }> = [];
+	let killSignal: NodeJS.Signals | undefined;
+	let childClosed: Promise<unknown> | undefined;
+	let terminations = 0;
 	const conn = new AcpConnection({
 		cwd: dir,
 		bin: process.execPath,
@@ -81,6 +133,12 @@ test("acp connection: a stdout frame flood kills the connection instead of growi
 			// read slower than the 34MB flows) and kill the flood mid-write.
 			`process.stdout.write("x".repeat(34*1024*1024), () => process.exit(0));`,
 		],
+		terminateProcess: async (child, signal) => {
+			killSignal = signal;
+			childClosed = once(child, "close");
+			terminations += 1;
+			child.kill("SIGKILL");
+		},
 		log: () => {},
 		onUpdate: () => {},
 		onExit: (info) => exits.push(info),
@@ -93,6 +151,10 @@ test("acp connection: a stdout frame flood kills the connection instead of growi
 	}
 	assert.match((rejection as Error)?.message ?? "", /frame overflow/i);
 	assert.ok(exits.length > 0, "exit fired");
+	await conn.dispose();
+	assert.equal(killSignal, "SIGKILL");
+	assert.equal(terminations, 1);
+	await childClosed;
 	fs.rmSync(dir, { recursive: true, force: true });
 }, 30_000);
 

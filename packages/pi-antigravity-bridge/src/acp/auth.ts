@@ -106,7 +106,7 @@ export function runAcpAuth(opts: AcpAuthOptions): Promise<AcpAuthResult> {
 		} catch (err) {
 			return { ok: false, error: err instanceof Error ? err.message : String(err) };
 		} finally {
-			conn.kill();
+			await conn.dispose();
 		}
 	};
 	// One sign-in at a time: two concurrent runs would race the OAuth loopback
