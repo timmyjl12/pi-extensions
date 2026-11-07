@@ -14,7 +14,7 @@ import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { dialogChoice, type ChoiceOption, type DialogContext, type DialogRow } from "@estebanforge/pi-tui-dialogs";
 import fs from "node:fs";
 import path from "node:path";
-import { DEFAULT_ENGINE, type Engine } from "./config.js";
+import { DEFAULT_ENGINE, type Engine } from "./config.ts";
 
 /** Picker order is the default answer order: acp (the default engine)
  *  preselected first, stream-json as the fallback. */

@@ -6,8 +6,8 @@
 // watch) keeps synthesis off the day real usage appears in any frame, so
 // estimates can never shadow real numbers.
 
-import type { UsageEstimate } from "../config.js";
-import type { AgyUsage } from "../driver-types.js";
+import type { UsageEstimate } from "../config.ts";
+import type { AgyUsage } from "../driver-types.ts";
 
 const TOKEN_REGEX = /\w+|[^\s\w]/g;
 

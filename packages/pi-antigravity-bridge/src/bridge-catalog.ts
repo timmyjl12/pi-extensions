@@ -1,4 +1,4 @@
-import type { BridgeTools } from "./config.js";
+import type { BridgeTools } from "./config.ts";
 
 export interface BridgeToolInfo {
 	name: string;

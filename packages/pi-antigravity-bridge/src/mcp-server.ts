@@ -32,7 +32,7 @@ import {
 	LATEST_PROTOCOL_VERSION,
 	SUPPORTED_PROTOCOL_VERSIONS,
 } from "@modelcontextprotocol/sdk/types.js";
-import { GATED_AGY_TOOL_SET } from "./approval-hook.js";
+import { GATED_AGY_TOOL_SET } from "./approval-hook.ts";
 
 /** Tools we do NOT expose to agy: it would just error (the provider is already
  *  antigravity, so the tool's own guard refuses; advertising it is noise). */
@@ -157,7 +157,7 @@ export interface McpBridgeDeps {
 		name: string,
 		args: Record<string, unknown>,
 		signal: AbortSignal,
-	): Promise<import("./provider.js").BridgeCallResultShape>;
+	): Promise<import("./provider.ts").BridgeCallResultShape>;
 	/** Approval gate: called once per parked POST /approval, right after the
 	 *  early-ack. The provider interrupts the pi-side view of the agy turn and
 	 *  emits the shadow toolUse; the decision returns via approvals.resolve.

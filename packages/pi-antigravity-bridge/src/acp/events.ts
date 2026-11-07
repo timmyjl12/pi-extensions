@@ -14,7 +14,7 @@
 //   - available_commands_update { availableCommands: [...] }
 // Usage: ABSENT on RC01 (Gate B) — mapped defensively should a future build add it.
 
-import { StreamSanitizer, sanitizeSystemMessage } from "../stream-sanitizer.js";
+import { StreamSanitizer, sanitizeSystemMessage } from "../stream-sanitizer.ts";
 
 export { StreamSanitizer, sanitizeSystemMessage };
 

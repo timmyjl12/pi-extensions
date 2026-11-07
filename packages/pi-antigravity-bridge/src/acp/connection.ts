@@ -24,16 +24,16 @@ import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { parseAuthPort, readLastUrl } from "./browser-capture.js";
-import { frameCarriesUsage } from "./events.js";
-import type { AgyUsage } from "../driver-types.js";
+import { parseAuthPort, readLastUrl } from "./browser-capture.ts";
+import { frameCarriesUsage } from "./events.ts";
+import type { AgyUsage } from "../driver-types.ts";
 import {
 	PROCESS_KILL_TIMEOUT_MS,
 	terminateProcessTree,
 	trackSpawnedIdentity,
-} from "../process-tree.js";
-import { redactText } from "../redact.js";
-import { JsonRpcResponseError, JsonRpcSession } from "./jsonrpc.js";
+} from "../process-tree.ts";
+import { redactText } from "../redact.ts";
+import { JsonRpcResponseError, JsonRpcSession } from "./jsonrpc.ts";
 
 export interface AcpMcpServer {
 	name: string;

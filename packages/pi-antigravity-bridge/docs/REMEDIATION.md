@@ -14,3 +14,18 @@ The following MIT-licensed reference projects informed the patterns reimplemente
 - [ackneal/pi-agy-bridge](https://github.com/ackneal/pi-agy-bridge): idempotent bounded disposal and pre-aborted-call guard.
 
 The local implementation deliberately keeps its stronger PID identity checks and incremental NDJSON framing. It does **not** adopt the references' quadratic full-buffer parsing or blind `taskkill` behavior.
+
+## Startup cost
+
+Sources import their siblings with `.ts` specifiers. pi loads this package through jiti, which probes a `./x.js` specifier on disk (a failed `stat` plus a thrown `NodeError`) before it falls back to `./x.ts`; 108 such imports cost several hundred milliseconds on every pi start and reload. `allowImportingTsExtensions` is enabled for the repository's `noEmit` typecheck. Behavior is unchanged: package-wide test results differ from the committed baseline only in the known non-hermetic driver fixtures that can resolve a real `agy.exe`.
+
+## Turn deadline policy
+
+An agy turn must always end. The policy used with this fork:
+
+| Setting | Value | Meaning |
+| --- | --- | --- |
+| `turnTimeoutMin` (env `AGY_TURN_TIMEOUT_MIN`) | `30` | Cap on one turn's **active** agy time. Parked time (pi-tool round trips, escalated calls, human-gated approvals) does not count against it. |
+| `inactivityTimeoutMin` (env `AGY_INACTIVITY_TIMEOUT_MIN`) | `3` | Silence cap: no stream output for this long fails the turn as a stall. |
+
+Both live in `~/.pi/agent/antigravity-bridge/config.json`; the environment variables win over the file. `0` disables a cap and is deliberately not part of this policy.

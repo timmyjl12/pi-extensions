@@ -33,19 +33,19 @@ import {
 } from "@earendil-works/pi-ai";
 import fs from "node:fs";
 import type { Api } from "@earendil-works/pi-ai";
-import type { DriverActivity, TurnDriver, TurnHandle } from "./driver-types.js";
-import { SubagentRoster } from "./subagent-roster.js";
-import { toPiUsage } from "./stream-events.js";
-import { mapAgyToolToNative } from "./native-tools.js";
-import { toAgyEffort, type AgyModelEntry } from "./models.js";
-import { SessionStore } from "./sessions.js";
-import { loadConfig } from "./config.js";
-import { GATE_MARKER, mapNativeToShadow, stripMarkerFields } from "./approval-gate.js";
-import type { ApprovalDecision, ApprovalPayload, ApprovalParkApi } from "./mcp-server.js";
+import type { DriverActivity, TurnDriver, TurnHandle } from "./driver-types.ts";
+import { SubagentRoster } from "./subagent-roster.ts";
+import { toPiUsage } from "./stream-events.ts";
+import { mapAgyToolToNative } from "./native-tools.ts";
+import { toAgyEffort, type AgyModelEntry } from "./models.ts";
+import { SessionStore } from "./sessions.ts";
+import { loadConfig } from "./config.ts";
+import { GATE_MARKER, mapNativeToShadow, stripMarkerFields } from "./approval-gate.ts";
+import type { ApprovalDecision, ApprovalPayload, ApprovalParkApi } from "./mcp-server.ts";
 import path from "node:path";
-import { TurnDiffContext, createExecGitOps, formatInlineDiff, parseEditToolInput } from "./diff-render.js";
-import { stageSyspromptAgent } from "./sysprompt-agent.js";
-import { buildImageNote, stagePromptImages } from "./prompt-images.js";
+import { TurnDiffContext, createExecGitOps, formatInlineDiff, parseEditToolInput } from "./diff-render.ts";
+import { stageSyspromptAgent } from "./sysprompt-agent.ts";
+import { buildImageNote, stagePromptImages } from "./prompt-images.ts";
 
 const DEFAULT_TIMEOUT_MIN = 10;
 

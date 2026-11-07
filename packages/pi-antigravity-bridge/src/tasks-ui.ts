@@ -8,7 +8,7 @@
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Spacer, Text } from "@earendil-works/pi-tui";
-import type { AgyTask } from "./tasks.js";
+import type { AgyTask } from "./tasks.ts";
 
 export type TasksBrowserAction = { type: "rescan" } | { type: "close" };
 

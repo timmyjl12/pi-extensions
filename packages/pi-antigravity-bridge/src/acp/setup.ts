@@ -16,7 +16,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ensureQueuedMessagesInFile, QUEUED_MESSAGES_SEND_IMMEDIATELY } from "../queued-messages.js";
+import { ensureQueuedMessagesInFile, QUEUED_MESSAGES_SEND_IMMEDIATELY } from "../queued-messages.ts";
 
 export const REGISTRY_URL =
 	"https://raw.githubusercontent.com/agentclientprotocol/registry/main/antigravity-acp/agent.json";

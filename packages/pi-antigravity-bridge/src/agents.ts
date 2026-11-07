@@ -10,7 +10,7 @@
 // tools already pass for their throwaway agents). ACP has no agent slot in
 // the protocol (RC01), so selection is refused at the command level there.
 
-import { spawnAgyRaw } from "./models.js";
+import { spawnAgyRaw } from "./models.ts";
 
 /** Agent names are agy agent-dir names: filesystem-safe tokens. */
 export const AGENT_NAME_MAX = 128;

@@ -1,5 +1,5 @@
-import { AcpConnection } from "./connection.js";
-import { hasAcpToken, writeAcpAuthVerified } from "./setup.js";
+import { AcpConnection } from "./connection.ts";
+import { hasAcpToken, writeAcpAuthVerified } from "./setup.ts";
 
 // Explicit sign-in (/agy auth): spawn a short-lived server, send
 // `authenticate` (the RPC that fires the loopback listener + browser OAuth

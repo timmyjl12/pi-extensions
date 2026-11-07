@@ -33,7 +33,7 @@ import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { sweepStaleWebAgents } from "./web-tools.js";
+import { sweepStaleWebAgents } from "./web-tools.ts";
 
 export const SYS_AGENT_PREFIX = "pi-bridge-sys-";
 

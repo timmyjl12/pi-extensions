@@ -13,7 +13,7 @@
 // — but a pure-ACP install without the CLI cannot fetch it; the command
 // layer fails closed with a pointer instead of a raw error.
 
-import { spawnAgyRaw } from "./models.js";
+import { spawnAgyRaw } from "./models.ts";
 
 export const USAGE_TIMEOUT_MS = 30_000;
 const USAGE_CAP_BYTES = 1024 * 1024;

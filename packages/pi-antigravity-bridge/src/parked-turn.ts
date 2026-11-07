@@ -26,7 +26,7 @@
 // deliberately stream-json-only.
 
 import { open } from "node:fs/promises";
-import { agyConversationDir } from "./agy-paths.js";
+import { agyConversationDir } from "./agy-paths.ts";
 
 /** How much of the transcript tail to read. One final step is a few KiB;
  *  512KiB covers it plus slack for big tool-step lines above it. */

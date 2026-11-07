@@ -24,7 +24,7 @@
 
 import { appendFile, mkdir, readdir, unlink } from "node:fs/promises";
 import path from "node:path";
-import { redactText } from "./redact.js";
+import { redactText } from "./redact.ts";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 

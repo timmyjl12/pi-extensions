@@ -18,7 +18,7 @@
 // - Parallel spawns with the same agent name are separate entries, but
 //   name-based routing cannot tell them apart.
 
-import type { DriverActivity } from "./driver-types.js";
+import type { DriverActivity } from "./driver-types.ts";
 
 /** Tools whose start opens a roster entry and whose done/error closes it. */
 const SPAWN_TOOLS = new Set(["invoke_subagent", "run_subagent", "browser_subagent"]);

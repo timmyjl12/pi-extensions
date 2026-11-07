@@ -22,12 +22,12 @@
 //     approvals.mode allow to the same synchronous auto path
 
 import { randomUUID } from "node:crypto";
-import type { UsageEstimate } from "../config.js";
-import { AcpConnection, resolveAcpBinary, type AcpMcpServer, type AcpPermissionRequest } from "./connection.js";
-import type { AcpPermissionHandler } from "./connection.js";
-import { mapStopReason, mapUpdate, TextAccumulator, type AcpEditDiff } from "./events.js";
-import { SystemMessageOverflowError } from "../stream-sanitizer.js";
-import { estimateTokens, synthesizeUsage } from "./usage-estimate.js";
+import type { UsageEstimate } from "../config.ts";
+import { AcpConnection, resolveAcpBinary, type AcpMcpServer, type AcpPermissionRequest } from "./connection.ts";
+import type { AcpPermissionHandler } from "./connection.ts";
+import { mapStopReason, mapUpdate, TextAccumulator, type AcpEditDiff } from "./events.ts";
+import { SystemMessageOverflowError } from "../stream-sanitizer.ts";
+import { estimateTokens, synthesizeUsage } from "./usage-estimate.ts";
 import type {
 	AgyUsage,
 	DriverActivity,
@@ -37,7 +37,7 @@ import type {
 	TurnDriver,
 	TurnHandle,
 	TurnOutcome,
-} from "../driver-types.js";
+} from "../driver-types.ts";
 
 const LIFECYCLE_LIMIT = 24;
 
@@ -892,4 +892,4 @@ function describe(err: unknown): string {
 }
 
 // re-exported for the extension's doctor (server version display)
-export type { AcpMcpServer } from "./connection.js";
+export type { AcpMcpServer } from "./connection.ts";

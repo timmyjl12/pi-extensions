@@ -21,9 +21,9 @@ import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync }
 import os from "node:os";
 import path from "node:path";
 import { Type } from "typebox";
-import { NdjsonFrameAssembler } from "./ndjson-assembler.js";
-import { redactText } from "./redact.js";
-import { terminateProcessTree, trackSpawnedIdentity } from "./process-tree.js";
+import { NdjsonFrameAssembler } from "./ndjson-assembler.ts";
+import { redactText } from "./redact.ts";
+import { terminateProcessTree, trackSpawnedIdentity } from "./process-tree.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export const WEB_AGENT_PREFIX = "pi-bridge-web-";

@@ -14,7 +14,7 @@
 
 import os from "node:os";
 import path from "node:path";
-import type { Engine } from "./config.js";
+import type { Engine } from "./config.ts";
 
 /** Brain root for one engine. `home` injectable for tests. */
 export function agyBrainRoot(engine: Engine, home: string = os.homedir()): string {

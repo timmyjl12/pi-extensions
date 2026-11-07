@@ -35,8 +35,8 @@ import {
 	loadModelCatalogRaw,
 	toPiModel,
 	type AgyModelEntry,
-} from "../src/models.js";
-import { SessionStore } from "../src/sessions.js";
+} from "../src/models.ts";
+import { SessionStore } from "../src/sessions.ts";
 import {
 	APPROVAL_PARK_MS,
 	POLL_TOOL_NAME,
@@ -47,46 +47,46 @@ import {
 	formatEscalatedAck,
 	formatPollAnswer,
 	type NativeDisplayEvent,
-} from "../src/provider.js";
-import { PollRunFolder, type PollRunData } from "../src/poll-fold.js";
+} from "../src/provider.ts";
+import { PollRunFolder, type PollRunData } from "../src/poll-fold.ts";
 import {
 	createShadowTool,
 	stripMarkerFields,
 	type AnyToolDefinition,
 	type GatePolicy,
-} from "../src/approval-gate.js";
-import { detectPermissionGateExtensions, resolveGateMode } from "../src/approval-detect.js";
-import { hookScriptSource, removeGateHooks, stageGateHooks, sweepWorkspaceGateGroups } from "../src/approval-hook.js";
-import { StreamDriver } from "../src/driver.js";
-import { AcpDriver } from "../src/acp/driver.js";
-import { runAcpAuth } from "../src/acp/auth.js";
-import { setAuthInvalidatedHook } from "../src/acp/connection.js";
-import { setupAuthUrlCapture } from "../src/acp/browser-capture.js";
-import { clearAcpAuthVerified, ensureAcpReady, inspectAcpSetup } from "../src/acp/setup.js";
-import { ensureQueuedMessagesDefaults } from "../src/queued-messages.js";
-import type { TurnDriver, TurnOutcome } from "../src/driver-types.js";
-import { CONFIG_PATH, loadConfig, loadConfigAsync, logsDir, MAX_TURN_CAP_MIN, parseCapMinutes, saveConfig, type AgyMode, type BridgeTools, type Engine, type ThinkingTier } from "../src/config.js";
-import { agyMissingMessage, ENGINE_SETTINGS_ROW_ID, engineSettingsRow, isAgyInstalled, savedEngineMessage, showEnginePicker, shouldOfferEnginePicker } from "../src/engine-picker.js";
-import { checkAgyCliVersion, describeAgyVersionCheck, MIN_AGY_VERSION } from "../src/agy-version.js";
-import { isValidAgyAgentName, listAgyAgents } from "../src/agents.js";
-import { formatSubagentRoster, SubagentRoster } from "../src/subagent-roster.js";
+} from "../src/approval-gate.ts";
+import { detectPermissionGateExtensions, resolveGateMode } from "../src/approval-detect.ts";
+import { hookScriptSource, removeGateHooks, stageGateHooks, sweepWorkspaceGateGroups } from "../src/approval-hook.ts";
+import { StreamDriver } from "../src/driver.ts";
+import { AcpDriver } from "../src/acp/driver.ts";
+import { runAcpAuth } from "../src/acp/auth.ts";
+import { setAuthInvalidatedHook } from "../src/acp/connection.ts";
+import { setupAuthUrlCapture } from "../src/acp/browser-capture.ts";
+import { clearAcpAuthVerified, ensureAcpReady, inspectAcpSetup } from "../src/acp/setup.ts";
+import { ensureQueuedMessagesDefaults } from "../src/queued-messages.ts";
+import type { TurnDriver, TurnOutcome } from "../src/driver-types.ts";
+import { CONFIG_PATH, loadConfig, loadConfigAsync, logsDir, MAX_TURN_CAP_MIN, parseCapMinutes, saveConfig, type AgyMode, type BridgeTools, type Engine, type ThinkingTier } from "../src/config.ts";
+import { agyMissingMessage, ENGINE_SETTINGS_ROW_ID, engineSettingsRow, isAgyInstalled, savedEngineMessage, showEnginePicker, shouldOfferEnginePicker } from "../src/engine-picker.ts";
+import { checkAgyCliVersion, describeAgyVersionCheck, MIN_AGY_VERSION } from "../src/agy-version.ts";
+import { isValidAgyAgentName, listAgyAgents } from "../src/agents.ts";
+import { formatSubagentRoster, SubagentRoster } from "../src/subagent-roster.ts";
 import { spawn } from "node:child_process";
-import { fetchAgyQuota, formatAgyQuotaReport } from "../src/usage.js";
-import { artifactOpenCommand, listAgyArtifacts } from "../src/artifacts.js";
-import { showArtifactsBrowser } from "../src/artifacts-ui.js";
-import { listAgyTasks, tailAgyTaskLog } from "../src/tasks.js";
-import { showTasksBrowser } from "../src/tasks-ui.js";
-import { agyConversationDir } from "../src/agy-paths.js";
-import { createDailyLogger, type DailyLogger } from "../src/daily-log.js";
-import { registerAskAntigravityTool, toolModelsFromRaw } from "../src/ask-tool.js";
-import { registerWebTools } from "../src/web-tools.js";
-import { bridgeMcpConfigDir, startMcpServer, TOKEN_HEADER, type McpServerHandle } from "../src/mcp-server.js";
+import { fetchAgyQuota, formatAgyQuotaReport } from "../src/usage.ts";
+import { artifactOpenCommand, listAgyArtifacts } from "../src/artifacts.ts";
+import { showArtifactsBrowser } from "../src/artifacts-ui.ts";
+import { listAgyTasks, tailAgyTaskLog } from "../src/tasks.ts";
+import { showTasksBrowser } from "../src/tasks-ui.ts";
+import { agyConversationDir } from "../src/agy-paths.ts";
+import { createDailyLogger, type DailyLogger } from "../src/daily-log.ts";
+import { registerAskAntigravityTool, toolModelsFromRaw } from "../src/ask-tool.ts";
+import { registerWebTools } from "../src/web-tools.ts";
+import { bridgeMcpConfigDir, startMcpServer, TOKEN_HEADER, type McpServerHandle } from "../src/mcp-server.ts";
 import {
 	registerBridgeServer,
 	healBridgeSuppression,
 	sweepStaleBridgeServers,
 	unregisterBridgeServer,
-} from "../src/mcp-registration.js";
+} from "../src/mcp-registration.ts";
 import {
 	ACTIVATE_SKILL_TOOL_NAME,
 	activateSkillSchema,
@@ -95,12 +95,12 @@ import {
 	readSkillBody,
 	scanSkills,
 	type SkillLite,
-} from "../src/skills.js";
-import { mapAgyToolToNative } from "../src/native-tools.js";
-import { bridgedPiTools } from "../src/bridge-catalog.js";
+} from "../src/skills.ts";
+import { mapAgyToolToNative } from "../src/native-tools.ts";
+import { bridgedPiTools } from "../src/bridge-catalog.ts";
 import { Type } from "typebox";
-import { patchStatus, restorePatch } from "../src/patch-cleanup.js";
-import { withDialogLock } from "../src/dialog-lock.js";
+import { patchStatus, restorePatch } from "../src/patch-cleanup.ts";
+import { withDialogLock } from "../src/dialog-lock.ts";
 
 // The server disowning our verified marker (-32000 anywhere: turn, session
 // new/load, cancel) must drop it, or ensureAcpReady keeps reporting a login

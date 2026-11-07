@@ -15,8 +15,8 @@
 import { readdir, stat } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import path from "node:path";
-import { terminateProcessTree, trackSpawnedIdentity } from "./process-tree.js";
-import { readTranscriptTail } from "./parked-turn.js";
+import { terminateProcessTree, trackSpawnedIdentity } from "./process-tree.ts";
+import { readTranscriptTail } from "./parked-turn.ts";
 
 const TASK_LOG_RE = /^task-(\d+)\.log$/;
 const MAX_TASKS = 128;

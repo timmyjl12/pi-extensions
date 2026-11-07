@@ -13,7 +13,7 @@
 // there: the one known-good build must not be locked out by a CLI number.
 
 import { spawn } from "node:child_process";
-import { terminateProcessTree, trackSpawnedIdentity } from "./process-tree.js";
+import { terminateProcessTree, trackSpawnedIdentity } from "./process-tree.ts";
 
 /** Floor for the stream-json CLI. Matches the protocol grammar our driver
  *  and the event mapping rely on; older agy predates verified fields. */

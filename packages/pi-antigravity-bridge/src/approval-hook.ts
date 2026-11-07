@@ -28,7 +28,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { bridgeMcpConfigDir } from "./mcp-server.js";
+import { bridgeMcpConfigDir } from "./mcp-server.ts";
 
 export const HOOK_GROUP = "pi-bridge-gate";
 

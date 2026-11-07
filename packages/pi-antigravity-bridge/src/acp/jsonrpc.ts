@@ -16,7 +16,7 @@
 //   - `abortAll()` rejects every pending request (Gate D teardown: no promise
 //     survives a killed connection).
 
-import { isKnownNoiseLine, MAX_FRAME_BYTES, stripGluedNoise } from "../frame-guard.js";
+import { isKnownNoiseLine, MAX_FRAME_BYTES, stripGluedNoise } from "../frame-guard.ts";
 
 export interface JsonRpcErrorShape {
 	code: number;

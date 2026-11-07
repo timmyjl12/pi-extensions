@@ -16,20 +16,20 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { parseAgyLine } from "./stream-events.js";
-import { isKnownNoiseLine, MAX_FRAME_BYTES, stripGluedNoise } from "./frame-guard.js";
-import { NdjsonFrameAssembler } from "./ndjson-assembler.js";
-import { bridgeMcpConfigDir, bridgeMcpConfigExists } from "./mcp-server.js";
-import { gateHooksStaged } from "./approval-hook.js";
-import { parkedTurnAnswer } from "./parked-turn.js";
-import { terminateProcessTree, trackSpawnedIdentity } from "./process-tree.js";
-import { defaultCliSettingsPath, ensureQueuedMessagesInFile } from "./queued-messages.js";
-import { redactText } from "./redact.js";
+import { parseAgyLine } from "./stream-events.ts";
+import { isKnownNoiseLine, MAX_FRAME_BYTES, stripGluedNoise } from "./frame-guard.ts";
+import { NdjsonFrameAssembler } from "./ndjson-assembler.ts";
+import { bridgeMcpConfigDir, bridgeMcpConfigExists } from "./mcp-server.ts";
+import { gateHooksStaged } from "./approval-hook.ts";
+import { parkedTurnAnswer } from "./parked-turn.ts";
+import { terminateProcessTree, trackSpawnedIdentity } from "./process-tree.ts";
+import { defaultCliSettingsPath, ensureQueuedMessagesInFile } from "./queued-messages.ts";
+import { redactText } from "./redact.ts";
 import {
 	StreamSanitizer,
 	sanitizeSystemMessage,
 	SystemMessageOverflowError,
-} from "./stream-sanitizer.js";
+} from "./stream-sanitizer.ts";
 import type {
 	AgyUsage,
 	DriverActivity,
@@ -40,7 +40,7 @@ import type {
 	TurnDriver,
 	TurnHandle,
 	TurnOutcome,
-} from "./driver-types.js";
+} from "./driver-types.ts";
 
 export type {
 	DriverActivity,
@@ -50,7 +50,7 @@ export type {
 	DriverTurnRequest,
 	TurnHandle,
 	TurnOutcome,
-} from "./driver-types.js";
+} from "./driver-types.ts";
 
 export { StreamSanitizer, sanitizeSystemMessage };
 

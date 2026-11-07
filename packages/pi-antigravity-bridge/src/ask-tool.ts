@@ -44,11 +44,11 @@ import {
   type ModelEntry,
   type Mode,
 } from "@estebanforge/pi-ask-shared";
-import { loadConfig, type AgyMode, type ThinkingTier } from "./config.js";
-import { redactText } from "./redact.js";
-import { acquireBridgeSuppression } from "./mcp-registration.js";
-import { AGY_EFFORT_ORDER, spawnAgyModelsRaw, toAgyEffort } from "./models.js";
-import { sweepStaleWebAgents, webAgentsRoot } from "./web-tools.js";
+import { loadConfig, type AgyMode, type ThinkingTier } from "./config.ts";
+import { redactText } from "./redact.ts";
+import { acquireBridgeSuppression } from "./mcp-registration.ts";
+import { AGY_EFFORT_ORDER, spawnAgyModelsRaw, toAgyEffort } from "./models.ts";
+import { sweepStaleWebAgents, webAgentsRoot } from "./web-tools.ts";
 
 // --- Constants -------------------------------------------------------------
 
