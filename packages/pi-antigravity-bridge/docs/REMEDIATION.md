@@ -21,11 +21,16 @@ Sources import their siblings with `.ts` specifiers. pi loads this package throu
 
 ## Turn deadline policy
 
-An agy turn must always end. The policy used with this fork:
+A deadline must bound a hung agy without killing legitimate long work such as a long test run, so the policy follows what each clock actually measures (`src/driver.ts`, `src/provider.ts`):
 
 | Setting | Value | Meaning |
 | --- | --- | --- |
-| `turnTimeoutMin` (env `AGY_TURN_TIMEOUT_MIN`) | `30` | Cap on one turn's **active** agy time. Parked time (pi-tool round trips, escalated calls, human-gated approvals) does not count against it. |
-| `inactivityTimeoutMin` (env `AGY_INACTIVITY_TIMEOUT_MIN`) | `3` | Silence cap: no stream output for this long fails the turn as a stall. |
+| `turnTimeoutMin` (env `AGY_TURN_TIMEOUT_MIN`) | `0` (no cap) | The package default on an interactive pi: you are the backstop with Esc. Leave the key out to get the headless default of `20`, where nobody can abort. |
+| `inactivityTimeoutMin` (env `AGY_INACTIVITY_TIMEOUT_MIN`) | `30` | Silence cap: no stream output for this long fails the turn as a stall. Generous on purpose so a long agy-native command is not cut off while a hung agy is still detected. The package default is `5`; keep it above the longest silent native step. |
 
-Both live in `~/.pi/agent/antigravity-bridge/config.json`; the environment variables win over the file. `0` disables a cap and is deliberately not part of this policy.
+What each clock counts:
+
+- **pi tools through the bridge** (for example a pytest or build run by pi's shell tool): both clocks stay paused from the moment the call parks until pi returns its result, including while the model polls `bridge_poll_result`. The bridge waits at most 30 minutes (`ESCALATED_TIMEOUT_MS`) for one such call; after that the call is reported as failed to the model, the pi tool itself keeps running, and its late result is re-delivered.
+- **agy-native commands** (`run_command` inside the agy process): neither clock pauses. They count toward the turn cap and, because agy prints nothing while they run, toward the silence cap. That is why the silence cap is not small.
+
+Both live in `~/.pi/agent/antigravity-bridge/config.json`; the environment variables win over the file and a change applies from the next turn. `0` disables a cap, which is the interactive default for the turn cap.
